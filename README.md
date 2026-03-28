@@ -22,9 +22,34 @@ The project currently includes:
   - trim right
   - delete
   - duplicate
-- A real preview path for imported video/image in the Flutter preview stage
+- A native preview path for imported video/image on iOS and Android
 - A Rust engine foundation connected through FFI
 - Rust timeline state operations already wired into Flutter
+- An engine asset registry and clip-to-asset binding model
+- Clip-aware preview playback using:
+  - asset id
+  - source offset
+  - source start / end bounds
+
+### Architecture Phase Status
+
+- `Phase 0`: completed
+  - Flutter = UI
+  - Rust = orchestration / timeline / transport
+  - iOS/Android native = preview plumbing
+- `Phase 1`: completed
+  - `video_player` removed
+  - native media-backed preview path in place
+- `Phase 2`: in active progress
+  - `Sprint 1`: asset registry inside the engine
+  - `Sprint 2`: timeline clips bound to real imported assets
+  - `Sprint 3`: clip source offsets wired into preview timing
+  - `Sprint 4`: clip-bounded preview playback and project duration synchronization
+- `Phase 3+`: not started yet
+  - compositor
+  - transitions
+  - export engine
+  - performance pass
 
 ## What Has Been Built
 
@@ -59,16 +84,21 @@ The app can now import:
 
 Imported assets are stored in the in-app asset list and can be inserted into the timeline with their correct media type.
 
+The import side now feeds the engine asset registry rather than staying as Flutter-only UI state.
+
 ### Preview Behavior
 
-The preview shell is no longer a static placeholder.
+The preview shell is no longer a static placeholder or a `video_player` wrapper.
 
 For imported visual assets:
 
-- Video preview uses `video_player`
+- Video preview uses native platform preview surfaces on iOS and Android
 - Image preview uses the imported file directly
 - The first inserted visual asset determines the working aspect ratio
 - The preview area follows the imported media aspect ratio instead of staying fixed to a mock ratio
+- The active timeline clip drives preview selection
+- Split and trim now affect preview source timing through clip-local offsets
+- Preview playback is bounded to clip start/end instead of always treating the full source as one flat asset
 
 ### Engine Foundation
 
@@ -87,7 +117,26 @@ Rust currently handles the foundation for:
 - trim left / trim right
 - delete
 - duplicate
+- asset registry
+- clip asset binding
+- clip source offsets
+- project duration recomputation from timeline state
 - timeline snapshots returned to Flutter
+
+Flutter currently reads real timeline state from the engine and resolves active visual bindings from engine-owned clip data.
+
+### Native Preview Layer
+
+The current native preview stack is:
+
+- iOS:
+  - `AVPlayerLayer`
+  - native media probing through `AVFoundation`
+- Android:
+  - `TextureView + MediaPlayer`
+  - native media probing through `MediaMetadataRetriever`
+
+This is still a preview phase implementation, not yet the final compositor/render/export engine.
 
 ## Repository Structure
 
@@ -179,12 +228,20 @@ The project is advancing from UI-plus-engine-state into full native preview/rend
 
 The biggest remaining milestones are:
 
-- real native preview surface playback path
+- final transport synchronization between engine timeline and native preview
 - full asset hydration into engine state
 - real audio/video sync engine
 - multi-track compositing
+- transition graph
 - export pipeline
 - performance tuning for mobile-class devices
+
+The next major architectural milestone is:
+
+- `Phase 3: Compositor Engine`
+  - multi-layer video/image/audio/text rendering
+  - GPU-backed composition
+  - engine-owned visual output instead of single-source preview handoff
 
 ## Design Direction
 
@@ -206,10 +263,10 @@ The editor is being built with expansion in mind, not as a temporary mock app.
 - The repository is focused on mobile-first editor behavior.
 - The current implementation prioritizes architecture and correctness before heavy rendering optimization.
 - Flutter is the front-end layer only; the engine is being moved toward native-grade behavior through Rust plus platform-native rendering paths.
+- The current preview path is real and native, but it is not yet the final compositor/export engine.
 
 ## Project Name
 
 This repository is the dedicated Flutter editor project:
 
 - Fusion Video
-

@@ -1,14 +1,17 @@
 package com.example.fx_flutter_editor
 
+import android.graphics.BitmapFactory
 import android.content.Context
 import android.graphics.Color
+import android.graphics.SurfaceTexture
+import android.media.MediaMetadataRetriever
+import android.media.MediaPlayer
 import android.os.Bundle
-import android.util.TypedValue
-import android.view.Gravity
+import android.view.Surface
+import android.view.TextureView
 import android.view.View
 import android.widget.FrameLayout
-import android.widget.LinearLayout
-import android.widget.TextView
+import android.widget.ImageView
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
@@ -41,34 +44,154 @@ class MainActivity : FlutterActivity() {
             val projectId = (args?.get("projectId") as? Number)?.toInt()
             val positionSeconds = (args?.get("positionSeconds") as? Number)?.toDouble()
             val isPlaying = args?.get("isPlaying") as? Boolean
+            val sourcePath = args?.get("sourcePath") as? String
+            val sourceKind = args?.get("sourceKind") as? String
+            val sourceStartSeconds = (args?.get("sourceStartSeconds") as? Number)?.toDouble()
+            val sourceEndSeconds = (args?.get("sourceEndSeconds") as? Number)?.toDouble()
 
             if (projectId == null || positionSeconds == null || isPlaying == null) {
                 result.error("invalid_args", "Missing preview session arguments", null)
                 return@setMethodCallHandler
             }
 
-            FusionPreviewRegistry.update(projectId, positionSeconds, isPlaying)
+            FusionPreviewRegistry.update(
+                projectId,
+                sourcePath,
+                sourceKind,
+                sourceStartSeconds,
+                sourceEndSeconds,
+                positionSeconds,
+                isPlaying,
+            )
             result.success(null)
+        }
+
+        MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            "fusion_video/media_probe",
+        ).setMethodCallHandler { call, result ->
+            if (call.method != "probeMedia") {
+                result.notImplemented()
+                return@setMethodCallHandler
+            }
+
+            val args = call.arguments as? Map<*, *>
+            val path = args?.get("path") as? String
+            val kind = args?.get("kind") as? String
+
+            if (path == null || kind == null) {
+                result.error("invalid_args", "Missing probe arguments", null)
+                return@setMethodCallHandler
+            }
+
+            result.success(FusionMediaProbe.probe(path, kind))
+        }
+    }
+}
+
+private object FusionMediaProbe {
+    fun probe(path: String, kind: String): Map<String, Any>? {
+        return when (kind) {
+            "video" -> {
+                val retriever = MediaMetadataRetriever()
+                try {
+                    retriever.setDataSource(path)
+                    val durationMs =
+                        retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)
+                            ?.toDoubleOrNull() ?: 0.0
+                    val width =
+                        retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)
+                            ?.toIntOrNull()
+                    val height =
+                        retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)
+                            ?.toIntOrNull()
+                    buildMap<String, Any> {
+                        put("durationSeconds", durationMs / 1000.0)
+                        if (width != null) put("width", width)
+                        if (height != null) put("height", height)
+                    }
+                } finally {
+                    retriever.release()
+                }
+            }
+
+            "image" -> {
+                val options = BitmapFactory.Options().apply {
+                    inJustDecodeBounds = true
+                }
+                BitmapFactory.decodeFile(path, options)
+                buildMap<String, Any> {
+                    if (options.outWidth > 0) put("width", options.outWidth)
+                    if (options.outHeight > 0) put("height", options.outHeight)
+                }
+            }
+
+            else -> null
         }
     }
 }
 
 private object FusionPreviewRegistry {
     private val views = mutableMapOf<Int, MutableList<FusionPreviewNativeView>>()
+    private val payloads = mutableMapOf<Int, FusionPreviewPayload>()
 
     fun attach(projectId: Int, view: FusionPreviewNativeView) {
         val bucket = views.getOrPut(projectId) { mutableListOf() }
         bucket.add(view)
+        payloads[projectId]?.let {
+            view.update(
+                it.sourcePath,
+                it.sourceKind,
+                it.sourceStartSeconds,
+                it.sourceEndSeconds,
+                it.positionSeconds,
+                it.isPlaying,
+            )
+        }
     }
 
     fun detach(projectId: Int, view: FusionPreviewNativeView) {
         views[projectId]?.remove(view)
     }
 
-    fun update(projectId: Int, positionSeconds: Double, isPlaying: Boolean) {
-        views[projectId]?.forEach { it.update(positionSeconds, isPlaying) }
+    fun update(
+        projectId: Int,
+        sourcePath: String?,
+        sourceKind: String?,
+        sourceStartSeconds: Double?,
+        sourceEndSeconds: Double?,
+        positionSeconds: Double,
+        isPlaying: Boolean,
+    ) {
+        payloads[projectId] = FusionPreviewPayload(
+            sourcePath = sourcePath,
+            sourceKind = sourceKind,
+            sourceStartSeconds = sourceStartSeconds,
+            sourceEndSeconds = sourceEndSeconds,
+            positionSeconds = positionSeconds,
+            isPlaying = isPlaying,
+        )
+        views[projectId]?.forEach {
+            it.update(
+                sourcePath,
+                sourceKind,
+                sourceStartSeconds,
+                sourceEndSeconds,
+                positionSeconds,
+                isPlaying,
+            )
+        }
     }
 }
+
+private data class FusionPreviewPayload(
+    val sourcePath: String?,
+    val sourceKind: String?,
+    val sourceStartSeconds: Double?,
+    val sourceEndSeconds: Double?,
+    val positionSeconds: Double,
+    val isPlaying: Boolean,
+)
 
 private class FusionPreviewViewFactory : PlatformViewFactory(StandardMessageCodec.INSTANCE) {
     override fun create(context: Context, viewId: Int, args: Any?): PlatformView {
@@ -93,84 +216,209 @@ private class FusionPreviewPlatformView(
 private class FusionPreviewNativeView(
     context: Context,
     private val projectId: Int,
-) : FrameLayout(context) {
-    private val titleLabel = TextView(context)
-    private val statusLabel = TextView(context)
-    private val progressTrack = FrameLayout(context)
-    private val progressFill = View(context)
-
-    init {
-        setBackgroundColor(Color.parseColor("#111113"))
-
-        val content = LinearLayout(context).apply {
-            orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(18), dp(18), dp(18), dp(18))
-            layoutParams =
-                LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT)
-        }
-
-        titleLabel.apply {
-            text = "Fusion Native Preview"
-            setTextColor(Color.parseColor("#F1F1F1"))
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 17f)
-        }
-
-        statusLabel.apply {
-            setTextColor(Color.parseColor("#A7A7AB"))
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
-        }
-
-        progressTrack.apply {
-            setBackgroundColor(Color.parseColor("#1E1E23"))
-            layoutParams = LinearLayout.LayoutParams(
-                LayoutParams.MATCH_PARENT,
-                dp(6),
-            ).apply {
-                topMargin = dp(16)
+) : FrameLayout(context), TextureView.SurfaceTextureListener {
+    private val textureView = TextureView(context)
+    private val imageView = ImageView(context)
+    private var surface: Surface? = null
+    private var mediaPlayer: MediaPlayer? = null
+    private var currentSourcePath: String? = null
+    private var currentSourceKind: String? = null
+    private var currentSourceStartSeconds: Double = 0.0
+    private var currentSourceEndSeconds: Double? = null
+    private var currentPositionSeconds: Double = 0.0
+    private var isCurrentlyPlaying: Boolean = false
+    private var isPrepared: Boolean = false
+    private val boundaryRunnable = object : Runnable {
+        override fun run() {
+            val player = mediaPlayer ?: return
+            val endSeconds = currentSourceEndSeconds ?: return
+            val endMs = (endSeconds * 1000.0).toInt().coerceAtLeast(0)
+            if (player.currentPosition >= endMs - 15) {
+                player.pause()
+                player.seekTo(endMs)
+                removeCallbacks(this)
+                return
             }
-            clipToOutline = true
+            if (isCurrentlyPlaying) {
+                postDelayed(this, 33)
+            }
         }
-
-        progressFill.setBackgroundColor(Color.parseColor("#5BDE57"))
-        progressTrack.addView(
-            progressFill,
-            LayoutParams(0, LayoutParams.MATCH_PARENT),
-        )
-
-        content.addView(titleLabel)
-        content.addView(statusLabel)
-        content.addView(progressTrack)
-        addView(content)
-
-        FusionPreviewRegistry.attach(projectId, this)
-        update(0.0, false)
     }
 
-    fun update(positionSeconds: Double, isPlaying: Boolean) {
-        statusLabel.text = "${if (isPlaying) "Playing" else "Paused"}  ${"%.2f".format(positionSeconds)}s"
+    init {
+        setBackgroundColor(Color.BLACK)
 
-        post {
-            val width = progressTrack.width
-            if (width <= 0) return@post
-            val progress = (positionSeconds / 5.0).coerceIn(0.0, 1.0)
-            progressFill.layoutParams = LayoutParams(
-                (width * progress).toInt(),
-                LayoutParams.MATCH_PARENT,
-            )
-            progressFill.requestLayout()
+        imageView.apply {
+            layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT)
+            scaleType = ImageView.ScaleType.CENTER_CROP
+            visibility = View.GONE
         }
+
+        textureView.apply {
+            layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT)
+            surfaceTextureListener = this@FusionPreviewNativeView
+            visibility = View.GONE
+        }
+
+        addView(imageView)
+        addView(textureView)
+
+        FusionPreviewRegistry.attach(projectId, this)
+        update(null, null, null, null, 0.0, false)
+    }
+
+    fun update(
+        sourcePath: String?,
+        sourceKind: String?,
+        sourceStartSeconds: Double?,
+        sourceEndSeconds: Double?,
+        positionSeconds: Double,
+        isPlaying: Boolean,
+    ) {
+        val sourceChanged = sourcePath != currentSourcePath || sourceKind != currentSourceKind
+        currentSourcePath = sourcePath
+        currentSourceKind = sourceKind
+        currentSourceStartSeconds = kotlin.math.max(0.0, sourceStartSeconds ?: 0.0)
+        currentSourceEndSeconds = sourceEndSeconds
+        currentPositionSeconds = positionSeconds
+        isCurrentlyPlaying = isPlaying
+        if (sourceChanged) {
+            loadSource()
+        }
+        applyTransport()
     }
 
     fun dispose() {
+        releasePlayer()
+        removeCallbacks(boundaryRunnable)
+        surface?.release()
+        surface = null
         FusionPreviewRegistry.detach(projectId, this)
     }
 
-    private fun dp(value: Int): Int {
-        return TypedValue.applyDimension(
-            TypedValue.COMPLEX_UNIT_DIP,
-            value.toFloat(),
-            resources.displayMetrics,
-        ).toInt()
+    private fun loadSource() {
+        when (currentSourceKind) {
+            "video" -> {
+                imageView.setImageDrawable(null)
+                imageView.visibility = View.GONE
+                textureView.visibility = View.VISIBLE
+                if (surface == null) {
+                    return
+                }
+                prepareVideoPlayer()
+            }
+
+            "image" -> {
+                releasePlayer()
+                textureView.visibility = View.GONE
+                imageView.visibility = View.VISIBLE
+                imageView.setImageBitmap(
+                    currentSourcePath?.let { BitmapFactory.decodeFile(it) },
+                )
+            }
+
+            else -> {
+                releasePlayer()
+                textureView.visibility = View.GONE
+                imageView.setImageDrawable(null)
+                imageView.visibility = View.GONE
+            }
+        }
+    }
+
+    private fun prepareVideoPlayer() {
+        val path = currentSourcePath ?: run {
+            releasePlayer()
+            return
+        }
+        val previewSurface = surface ?: return
+        releasePlayer()
+        isPrepared = false
+        mediaPlayer = MediaPlayer().apply {
+            setDataSource(path)
+            setSurface(previewSurface)
+            isLooping = false
+            setOnPreparedListener {
+                isPrepared = true
+                applyTransport()
+            }
+            prepareAsync()
+        }
+    }
+
+    private fun applyTransport() {
+        val player = mediaPlayer ?: return
+        if (!isPrepared) return
+
+        val targetMs = clampedPositionMs(currentPositionSeconds)
+        if (kotlin.math.abs(player.currentPosition - targetMs) > 40) {
+            player.seekTo(targetMs)
+        }
+
+        if (isCurrentlyPlaying) {
+            val endMs = currentSourceEndSeconds
+                ?.let { (it * 1000.0).toInt().coerceAtLeast(0) }
+            if (endMs != null && player.currentPosition >= endMs - 15) {
+                player.pause()
+                player.seekTo(endMs)
+                removeCallbacks(boundaryRunnable)
+                return
+            }
+            if (!player.isPlaying) {
+                player.start()
+            }
+            removeCallbacks(boundaryRunnable)
+            post(boundaryRunnable)
+        } else if (player.isPlaying) {
+            player.pause()
+            removeCallbacks(boundaryRunnable)
+        } else {
+            removeCallbacks(boundaryRunnable)
+        }
+    }
+
+    private fun releasePlayer() {
+        mediaPlayer?.setOnPreparedListener(null)
+        mediaPlayer?.stopSafely()
+        mediaPlayer?.release()
+        mediaPlayer = null
+        isPrepared = false
+        removeCallbacks(boundaryRunnable)
+    }
+
+    private fun clampedPositionMs(seconds: Double): Int {
+        val lowerBound = (currentSourceStartSeconds * 1000.0).toInt().coerceAtLeast(0)
+        val upperBound = currentSourceEndSeconds
+            ?.let { (it * 1000.0).toInt().coerceAtLeast(lowerBound) }
+        val target = (seconds * 1000.0).toInt().coerceAtLeast(0)
+        return when {
+            upperBound != null -> target.coerceIn(lowerBound, upperBound)
+            else -> target.coerceAtLeast(lowerBound)
+        }
+    }
+
+    override fun onSurfaceTextureAvailable(surfaceTexture: SurfaceTexture, width: Int, height: Int) {
+        surface = Surface(surfaceTexture)
+        if (currentSourceKind == "video") {
+            prepareVideoPlayer()
+        }
+    }
+
+    override fun onSurfaceTextureSizeChanged(surface: SurfaceTexture, width: Int, height: Int) = Unit
+
+    override fun onSurfaceTextureDestroyed(surfaceTexture: SurfaceTexture): Boolean {
+        releasePlayer()
+        surface?.release()
+        surface = null
+        return true
+    }
+
+    override fun onSurfaceTextureUpdated(surface: SurfaceTexture) = Unit
+}
+
+private fun MediaPlayer.stopSafely() {
+    try {
+        stop()
+    } catch (_: IllegalStateException) {
     }
 }

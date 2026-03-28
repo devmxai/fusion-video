@@ -75,6 +75,7 @@ typedef _EngineInsertClipNative = ffi.Uint8 Function(
   ffi.Int64 handle,
   ffi.Uint8 trackKind,
   ffi.Pointer<ffi.Char> clipId,
+  ffi.Pointer<ffi.Char> assetId,
   ffi.Double durationSeconds,
   ffi.Uint8 isMedia,
 );
@@ -82,8 +83,27 @@ typedef _EngineInsertClipDart = int Function(
   int handle,
   int trackKind,
   ffi.Pointer<ffi.Char> clipId,
+  ffi.Pointer<ffi.Char> assetId,
   double durationSeconds,
   int isMedia,
+);
+typedef _EngineImportAssetNative = ffi.Uint8 Function(
+  ffi.Int64 handle,
+  ffi.Pointer<ffi.Char> assetId,
+  ffi.Pointer<ffi.Char> uri,
+  ffi.Uint8 kind,
+  ffi.Double durationSeconds,
+  ffi.Int32 width,
+  ffi.Int32 height,
+);
+typedef _EngineImportAssetDart = int Function(
+  int handle,
+  ffi.Pointer<ffi.Char> assetId,
+  ffi.Pointer<ffi.Char> uri,
+  int kind,
+  double durationSeconds,
+  int width,
+  int height,
 );
 typedef _EngineGetPlaybackStateNative = ffi.Uint8 Function(ffi.Int64 handle);
 typedef _EngineGetPlaybackStateDart = int Function(int handle);
@@ -138,6 +158,8 @@ class FusionVideoFfiBridge implements FusionVideoEngineBridge {
             _EngineDuplicateClipDart>('fusion_video_engine_duplicate_clip'),
         _engineInsertClip = library.lookupFunction<_EngineInsertClipNative,
             _EngineInsertClipDart>('fusion_video_engine_insert_clip'),
+        _engineImportAsset = library.lookupFunction<_EngineImportAssetNative,
+            _EngineImportAssetDart>('fusion_video_engine_import_asset'),
         _engineGetPlaybackState = library.lookupFunction<
                 _EngineGetPlaybackStateNative, _EngineGetPlaybackStateDart>(
             'fusion_video_engine_get_playback_state'),
@@ -171,6 +193,7 @@ class FusionVideoFfiBridge implements FusionVideoEngineBridge {
   final _EngineDeleteClipDart _engineDeleteClip;
   final _EngineDuplicateClipDart _engineDuplicateClip;
   final _EngineInsertClipDart _engineInsertClip;
+  final _EngineImportAssetDart _engineImportAsset;
   final _EngineGetPlaybackStateDart _engineGetPlaybackState;
   final _EngineGetPositionSecondsDart _engineGetPositionSeconds;
   final _EngineGetPositionFrameDart _engineGetPositionFrame;
@@ -342,7 +365,27 @@ class FusionVideoFfiBridge implements FusionVideoEngineBridge {
   Future<void> importAsset(
     EngineProjectHandle handle,
     EngineAssetDescriptor asset,
-  ) async {}
+  ) async {
+    final nativeAssetId = asset.id.toNativeUtf8();
+    final nativeUri = asset.uri.toNativeUtf8();
+    try {
+      _ensureSuccess(
+        _engineImportAsset(
+          handle.id,
+          nativeAssetId.cast(),
+          nativeUri.cast(),
+          asset.kind.index,
+          asset.durationSeconds ?? 0,
+          asset.width ?? 0,
+          asset.height ?? 0,
+        ),
+        'import asset',
+      );
+    } finally {
+      malloc.free(nativeAssetId);
+      malloc.free(nativeUri);
+    }
+  }
 
   @override
   Future<void> play(EngineProjectHandle handle) async {
@@ -466,12 +509,14 @@ class FusionVideoFfiBridge implements FusionVideoEngineBridge {
     EngineInsertClipRequest request,
   ) async {
     final nativeClipId = request.clipId.toNativeUtf8();
+    final nativeAssetId = request.assetId.toNativeUtf8();
     try {
       _ensureSuccess(
         _engineInsertClip(
           handle.id,
           request.trackKind.index,
           nativeClipId.cast(),
+          nativeAssetId.cast(),
           request.durationSeconds,
           request.isMedia ? 1 : 0,
         ),
@@ -479,6 +524,7 @@ class FusionVideoFfiBridge implements FusionVideoEngineBridge {
       );
     } finally {
       malloc.free(nativeClipId);
+      malloc.free(nativeAssetId);
     }
   }
 
@@ -504,6 +550,9 @@ class FusionVideoFfiBridge implements FusionVideoEngineBridge {
             id: clipMap['id'] as String,
             durationSeconds: (clipMap['duration_seconds'] as num).toDouble(),
             isMedia: _parseClipMedia(clipMap['clip_type'] as String),
+            assetId: clipMap['asset_id'] as String?,
+            sourceOffsetSeconds:
+                (clipMap['source_offset_seconds'] as num?)?.toDouble(),
             splitGroupId: clipMap['split_group_id'] as String?,
           );
         }).toList(growable: false);

@@ -4,6 +4,7 @@ import 'engine_runtime_simulation.dart';
 class FusionVideoEngineStub implements FusionVideoEngineBridge {
   final Map<int, SimulatedProjectRuntime> _projects = {};
   final Map<int, List<EngineTimelineTrackSnapshot>> _timelineProjects = {};
+  final Map<int, Map<String, EngineAssetDescriptor>> _assetProjects = {};
   int _nextProjectId = 1;
   int _nextEditId = 1;
 
@@ -15,6 +16,7 @@ class FusionVideoEngineStub implements FusionVideoEngineBridge {
     final id = _nextProjectId++;
     _projects[id] = SimulatedProjectRuntime(config);
     _timelineProjects[id] = _buildDefaultTimeline();
+    _assetProjects[id] = <String, EngineAssetDescriptor>{};
     return EngineProjectHandle(id);
   }
 
@@ -31,13 +33,20 @@ class FusionVideoEngineStub implements FusionVideoEngineBridge {
     final runtime = _projects.remove(handle.id);
     runtime?.dispose();
     _timelineProjects.remove(handle.id);
+    _assetProjects.remove(handle.id);
   }
 
   @override
   Future<void> importAsset(
     EngineProjectHandle handle,
     EngineAssetDescriptor asset,
-  ) async {}
+  ) async {
+    final assets = _assetProjects[handle.id];
+    if (assets == null) {
+      throw StateError('Unknown engine project: ${handle.id}');
+    }
+    assets[asset.id] = asset;
+  }
 
   @override
   Future<void> insertClip(
@@ -60,6 +69,8 @@ class FusionVideoEngineStub implements FusionVideoEngineBridge {
             id: request.clipId,
             durationSeconds: request.durationSeconds,
             isMedia: request.isMedia,
+            assetId: request.assetId,
+            sourceOffsetSeconds: 0,
           ),
         ],
       );
@@ -72,6 +83,8 @@ class FusionVideoEngineStub implements FusionVideoEngineBridge {
               id: request.clipId,
               durationSeconds: request.durationSeconds,
               isMedia: request.isMedia,
+              assetId: request.assetId,
+              sourceOffsetSeconds: 0,
             ),
           ],
         ),
@@ -133,12 +146,17 @@ class FusionVideoEngineStub implements FusionVideoEngineBridge {
               id: '${location.clip.id}_a_$stamp',
               durationSeconds: leftDuration,
               isMedia: true,
+              assetId: location.clip.assetId,
+              sourceOffsetSeconds: location.clip.sourceOffsetSeconds ?? 0,
               splitGroupId: splitGroupId,
             ),
             EngineTimelineClipSnapshot(
               id: '${location.clip.id}_b_$stamp',
               durationSeconds: rightDuration,
               isMedia: true,
+              assetId: location.clip.assetId,
+              sourceOffsetSeconds:
+                  (location.clip.sourceOffsetSeconds ?? 0) + leftDuration,
               splitGroupId: splitGroupId,
             ),
           ]);
@@ -177,6 +195,8 @@ class FusionVideoEngineStub implements FusionVideoEngineBridge {
       id: location.clip.id,
       durationSeconds: location.clip.durationSeconds - delta,
       isMedia: location.clip.isMedia,
+      assetId: location.clip.assetId,
+      sourceOffsetSeconds: (location.clip.sourceOffsetSeconds ?? 0) + delta,
       splitGroupId: location.clip.splitGroupId,
     );
     _replaceTrack(
@@ -214,6 +234,8 @@ class FusionVideoEngineStub implements FusionVideoEngineBridge {
       id: location.clip.id,
       durationSeconds: newDuration,
       isMedia: location.clip.isMedia,
+      assetId: location.clip.assetId,
+      sourceOffsetSeconds: location.clip.sourceOffsetSeconds,
       splitGroupId: location.clip.splitGroupId,
     );
     _replaceTrack(
@@ -258,6 +280,8 @@ class FusionVideoEngineStub implements FusionVideoEngineBridge {
       id: '${location.clip.id}_copy_$stamp',
       durationSeconds: location.clip.durationSeconds,
       isMedia: location.clip.isMedia,
+      assetId: location.clip.assetId,
+      sourceOffsetSeconds: location.clip.sourceOffsetSeconds,
       splitGroupId: null,
     );
 

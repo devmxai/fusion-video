@@ -13,6 +13,10 @@ class FusionPreviewSessionBridge {
     required int projectId,
     required double positionSeconds,
     required bool isPlaying,
+    String? sourcePath,
+    String? sourceKind,
+    double? sourceStartSeconds,
+    double? sourceEndSeconds,
   }) async {
     if (kIsWeb || !(Platform.isIOS || Platform.isAndroid)) {
       return;
@@ -23,6 +27,10 @@ class FusionPreviewSessionBridge {
         'projectId': projectId,
         'positionSeconds': positionSeconds,
         'isPlaying': isPlaying,
+        'sourcePath': sourcePath,
+        'sourceKind': sourceKind,
+        'sourceStartSeconds': sourceStartSeconds,
+        'sourceEndSeconds': sourceEndSeconds,
       });
     } on MissingPluginException {
       // Preview bridge is not registered on this platform/runtime yet.

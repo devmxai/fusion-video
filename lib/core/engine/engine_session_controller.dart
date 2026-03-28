@@ -22,6 +22,7 @@ class FusionVideoEngineSessionController extends ChangeNotifier {
 
   final FusionVideoEngineBridge _bridge;
   final EngineProjectConfig _config;
+  final Map<String, EngineAssetDescriptor> _assetRegistry = {};
 
   EngineProjectHandle? _projectHandle;
   StreamSubscription<EngineStatusSnapshot>? _statusSubscription;
@@ -57,6 +58,99 @@ class FusionVideoEngineSessionController extends ChangeNotifier {
 
   List<TimelineTrackData> get tracks => List.unmodifiable(_tracks);
   String? get selectedClipId => _selectedClipId;
+  Map<String, EngineAssetDescriptor> get assetRegistry =>
+      Map.unmodifiable(_assetRegistry);
+  EngineAssetDescriptor? assetForId(String assetId) => _assetRegistry[assetId];
+
+  EngineVisualBinding? visualBindingForClipId(
+    String clipId, {
+    double? projectSeconds,
+  }) {
+    final location = _findClip(clipId);
+    if (location == null) {
+      return null;
+    }
+    final assetId = location.clip.assetId;
+    if (assetId == null) {
+      return null;
+    }
+    final asset = _assetRegistry[assetId];
+    if (asset == null ||
+        (asset.kind != EngineTrackKind.video &&
+            asset.kind != EngineTrackKind.image)) {
+      return null;
+    }
+
+    final seconds = projectSeconds ?? currentSeconds;
+    final timeWithinClip =
+        (seconds - location.start).clamp(0.0, location.clip.duration);
+    return EngineVisualBinding(
+      clipId: location.clip.id,
+      asset: asset,
+      clipStartSeconds: location.start,
+      clipEndSeconds: location.end,
+      clipDurationSeconds: location.clip.duration,
+      sourceStartSeconds: location.clip.sourceOffsetSeconds ?? 0,
+      sourceEndSeconds:
+          (location.clip.sourceOffsetSeconds ?? 0) + location.clip.duration,
+      sourcePositionSeconds:
+          (location.clip.sourceOffsetSeconds ?? 0) + timeWithinClip,
+    );
+  }
+
+  EngineAssetDescriptor? assetForClipId(String clipId) {
+    final location = _findClip(clipId);
+    final assetId = location?.clip.assetId;
+    if (assetId == null) {
+      return null;
+    }
+    return _assetRegistry[assetId];
+  }
+
+  EngineAssetDescriptor? activeVisualAssetAt(double seconds) {
+    return activeVisualBindingAt(seconds)?.asset;
+  }
+
+  EngineVisualBinding? activeVisualBindingAt(double seconds) {
+    for (final track in _tracks) {
+      if (track.kind != TimelineTrackKind.video &&
+          track.kind != TimelineTrackKind.image) {
+        continue;
+      }
+      var elapsed = 0.0;
+      for (final clip in track.clips) {
+        final start = elapsed;
+        final end = start + clip.duration;
+        elapsed = end;
+        if (clip.type != TimelineClipType.media) {
+          continue;
+        }
+        if (seconds >= start && seconds <= end + 0.0001) {
+          final assetId = clip.assetId;
+          if (assetId == null) {
+            return null;
+          }
+          final asset = _assetRegistry[assetId];
+          if (asset == null) {
+            return null;
+          }
+          final timeWithinClip = (seconds - start).clamp(0.0, clip.duration);
+          return EngineVisualBinding(
+            clipId: clip.id,
+            asset: asset,
+            clipStartSeconds: start,
+            clipEndSeconds: end,
+            clipDurationSeconds: clip.duration,
+            sourceStartSeconds: clip.sourceOffsetSeconds ?? 0,
+            sourceEndSeconds: (clip.sourceOffsetSeconds ?? 0) + clip.duration,
+            sourcePositionSeconds:
+                (clip.sourceOffsetSeconds ?? 0) + timeWithinClip,
+          );
+        }
+      }
+    }
+    return null;
+  }
 
   Future<void> initialize() async {
     if (_ready) {
@@ -329,6 +423,7 @@ class FusionVideoEngineSessionController extends ChangeNotifier {
   Future<void> insertClip({
     required EngineTrackKind trackKind,
     required String clipId,
+    required String assetId,
     required double durationSeconds,
     bool isMedia = true,
   }) async {
@@ -342,12 +437,24 @@ class FusionVideoEngineSessionController extends ChangeNotifier {
       EngineInsertClipRequest(
         trackKind: trackKind,
         clipId: clipId,
+        assetId: assetId,
         durationSeconds: durationSeconds,
         isMedia: isMedia,
       ),
     );
     _tracks = await _loadTracksFromEngine(handle);
     _selectedClipId = clipId;
+    notifyListeners();
+  }
+
+  Future<void> importAsset(EngineAssetDescriptor asset) async {
+    final handle = _projectHandle;
+    if (handle == null) {
+      return;
+    }
+
+    await _bridge.importAsset(handle, asset);
+    _assetRegistry[asset.id] = asset;
     notifyListeners();
   }
 
@@ -409,6 +516,8 @@ class FusionVideoEngineSessionController extends ChangeNotifier {
       duration: clip.durationSeconds,
       type: isMedia ? TimelineClipType.media : TimelineClipType.placeholder,
       tone: tone,
+      assetId: clip.assetId,
+      sourceOffsetSeconds: clip.sourceOffsetSeconds,
       label: isMedia ? null : _placeholderLabelFor(trackKind),
       splitGroupId: clip.splitGroupId,
     );
@@ -492,6 +601,7 @@ class FusionVideoEngineSessionController extends ChangeNotifier {
     }
     _ready = false;
     _tracks = const <TimelineTrackData>[];
+    _assetRegistry.clear();
     _selectedClipId = null;
     _status = const EngineStatusSnapshot(
       playbackState: EnginePlaybackState.stopped,
@@ -516,4 +626,26 @@ class _ClipLocation {
   final TimelineClipData clip;
   final double start;
   final double end;
+}
+
+class EngineVisualBinding {
+  const EngineVisualBinding({
+    required this.clipId,
+    required this.asset,
+    required this.clipStartSeconds,
+    required this.clipEndSeconds,
+    required this.clipDurationSeconds,
+    required this.sourceStartSeconds,
+    required this.sourceEndSeconds,
+    required this.sourcePositionSeconds,
+  });
+
+  final String clipId;
+  final EngineAssetDescriptor asset;
+  final double clipStartSeconds;
+  final double clipEndSeconds;
+  final double clipDurationSeconds;
+  final double sourceStartSeconds;
+  final double sourceEndSeconds;
+  final double sourcePositionSeconds;
 }

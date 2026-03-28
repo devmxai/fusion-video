@@ -41,11 +41,17 @@ class EngineAssetDescriptor {
     required this.id,
     required this.uri,
     required this.kind,
+    this.durationSeconds,
+    this.width,
+    this.height,
   });
 
   final String id;
   final String uri;
   final EngineTrackKind kind;
+  final double? durationSeconds;
+  final int? width;
+  final int? height;
 }
 
 class EngineTimelinePosition {
@@ -75,12 +81,16 @@ class EngineTimelineClipSnapshot {
     required this.id,
     required this.durationSeconds,
     required this.isMedia,
+    this.assetId,
+    this.sourceOffsetSeconds,
     this.splitGroupId,
   });
 
   final String id;
   final double durationSeconds;
   final bool isMedia;
+  final String? assetId;
+  final double? sourceOffsetSeconds;
   final String? splitGroupId;
 }
 
@@ -98,12 +108,14 @@ class EngineInsertClipRequest {
   const EngineInsertClipRequest({
     required this.trackKind,
     required this.clipId,
+    required this.assetId,
     required this.durationSeconds,
     required this.isMedia,
   });
 
   final EngineTrackKind trackKind;
   final String clipId;
+  final String assetId;
   final double durationSeconds;
   final bool isMedia;
 }

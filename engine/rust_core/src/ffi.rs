@@ -8,7 +8,7 @@ use std::{
 };
 
 use crate::{
-    project::{ProjectState, TrackKind},
+    project::{AssetState, ProjectState, TrackKind},
     timeline::{PlaybackState, TransportState},
 };
 
@@ -290,14 +290,62 @@ pub extern "C" fn fusion_video_engine_duplicate_clip(
 }
 
 #[no_mangle]
+pub extern "C" fn fusion_video_engine_import_asset(
+    handle: i64,
+    asset_id: *const std::os::raw::c_char,
+    uri: *const std::os::raw::c_char,
+    track_kind: u8,
+    duration_seconds: f64,
+    width: i32,
+    height: i32,
+) -> u8 {
+    if asset_id.is_null() || uri.is_null() {
+        return 0;
+    }
+
+    let Some(kind) = track_kind_from_u8(track_kind) else {
+        return 0;
+    };
+
+    let Ok(asset_id) = unsafe { CStr::from_ptr(asset_id) }.to_str() else {
+        return 0;
+    };
+    let Ok(uri) = unsafe { CStr::from_ptr(uri) }.to_str() else {
+        return 0;
+    };
+
+    with_runtime(handle, |runtime| {
+        runtime.project.import_asset(AssetState {
+            id: asset_id.to_string(),
+            uri: uri.to_string(),
+            kind,
+            duration_seconds: if duration_seconds > 0.0 {
+                Some(duration_seconds)
+            } else {
+                None
+            },
+            width: if width > 0 { Some(width as u32) } else { None },
+            height: if height > 0 {
+                Some(height as u32)
+            } else {
+                None
+            },
+        });
+        1
+    })
+    .unwrap_or(0)
+}
+
+#[no_mangle]
 pub extern "C" fn fusion_video_engine_insert_clip(
     handle: i64,
     track_kind: u8,
     clip_id: *const std::os::raw::c_char,
+    asset_id: *const std::os::raw::c_char,
     duration_seconds: f64,
     is_media: u8,
 ) -> u8 {
-    if clip_id.is_null() {
+    if clip_id.is_null() || asset_id.is_null() {
         return 0;
     }
 
@@ -308,11 +356,14 @@ pub extern "C" fn fusion_video_engine_insert_clip(
     let Ok(clip_id) = unsafe { CStr::from_ptr(clip_id) }.to_str() else {
         return 0;
     };
+    let Ok(asset_id) = unsafe { CStr::from_ptr(asset_id) }.to_str() else {
+        return 0;
+    };
 
     with_runtime(handle, |runtime| {
         if runtime
             .project
-            .insert_clip(kind, clip_id, duration_seconds, is_media != 0)
+            .insert_clip(kind, clip_id, asset_id, duration_seconds, is_media != 0)
         {
             1
         } else {

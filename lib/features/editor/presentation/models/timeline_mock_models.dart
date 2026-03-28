@@ -23,6 +23,8 @@ class TimelineClipData {
     required this.duration,
     required this.type,
     required this.tone,
+    this.assetId,
+    this.sourceOffsetSeconds,
     this.label,
     this.splitGroupId,
   });
@@ -31,6 +33,8 @@ class TimelineClipData {
   final double duration;
   final TimelineClipType type;
   final TimelineClipTone tone;
+  final String? assetId;
+  final double? sourceOffsetSeconds;
   final String? label;
   final String? splitGroupId;
 
@@ -39,6 +43,8 @@ class TimelineClipData {
     double? duration,
     TimelineClipType? type,
     TimelineClipTone? tone,
+    String? assetId,
+    double? sourceOffsetSeconds,
     String? label,
     String? splitGroupId,
   }) {
@@ -47,6 +53,8 @@ class TimelineClipData {
       duration: duration ?? this.duration,
       type: type ?? this.type,
       tone: tone ?? this.tone,
+      assetId: assetId ?? this.assetId,
+      sourceOffsetSeconds: sourceOffsetSeconds ?? this.sourceOffsetSeconds,
       label: label ?? this.label,
       splitGroupId: splitGroupId ?? this.splitGroupId,
     );

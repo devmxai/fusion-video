@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use serde::Serialize;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -16,17 +18,31 @@ pub enum ClipType {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct AssetState {
+    pub id: String,
+    pub uri: String,
+    pub kind: TrackKind,
+    pub duration_seconds: Option<f64>,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct ClipState {
     pub id: String,
+    pub asset_id: Option<String>,
+    pub source_offset_seconds: f64,
     pub duration_seconds: f64,
     pub clip_type: ClipType,
     pub split_group_id: Option<String>,
 }
 
 impl ClipState {
-    pub fn media(id: &str, duration_seconds: f64) -> Self {
+    pub fn media(id: &str, asset_id: &str, duration_seconds: f64) -> Self {
         Self {
             id: id.to_string(),
+            asset_id: Some(asset_id.to_string()),
+            source_offset_seconds: 0.0,
             duration_seconds,
             clip_type: ClipType::Media,
             split_group_id: None,
@@ -36,6 +52,8 @@ impl ClipState {
     pub fn placeholder(id: &str, duration_seconds: f64) -> Self {
         Self {
             id: id.to_string(),
+            asset_id: None,
+            source_offset_seconds: 0.0,
             duration_seconds,
             clip_type: ClipType::Placeholder,
             split_group_id: None,
@@ -55,7 +73,9 @@ pub struct ProjectState {
     pub height: u32,
     pub fps: f64,
     pub sample_rate: u32,
+    pub base_duration_seconds: f64,
     pub duration_seconds: f64,
+    pub assets: HashMap<String, AssetState>,
     pub tracks: Vec<TrackState>,
     edit_counter: u64,
 }
@@ -75,10 +95,16 @@ impl ProjectState {
             height,
             fps,
             sample_rate,
+            base_duration_seconds: duration_seconds,
             duration_seconds,
+            assets: HashMap::new(),
             tracks: build_default_tracks(),
             edit_counter: 0,
         }
+    }
+
+    pub fn import_asset(&mut self, asset: AssetState) {
+        self.assets.insert(asset.id.clone(), asset);
     }
 
     pub fn split_clip(&mut self, clip_id: &str, current_seconds: f64) -> bool {
@@ -96,8 +122,10 @@ impl ProjectState {
             return false;
         }
 
-        let split_at = current_seconds
-            .clamp(location.start_seconds + edge_padding, location.end_seconds - edge_padding);
+        let split_at = current_seconds.clamp(
+            location.start_seconds + edge_padding,
+            location.end_seconds - edge_padding,
+        );
         let left_duration = split_at - location.start_seconds;
         let right_duration = location.end_seconds - split_at;
 
@@ -107,12 +135,16 @@ impl ProjectState {
 
         let left_clip = ClipState {
             id: format!("{}_a_{split_stamp}", clip.id),
+            asset_id: clip.asset_id.clone(),
+            source_offset_seconds: clip.source_offset_seconds,
             duration_seconds: left_duration,
             clip_type: clip.clip_type,
             split_group_id: Some(split_group_id.clone()),
         };
         let right_clip = ClipState {
             id: format!("{}_b_{split_stamp}", clip.id),
+            asset_id: clip.asset_id.clone(),
+            source_offset_seconds: clip.source_offset_seconds + left_duration,
             duration_seconds: right_duration,
             clip_type: clip.clip_type,
             split_group_id: Some(split_group_id),
@@ -122,6 +154,7 @@ impl ProjectState {
         clips.remove(location.clip_index);
         clips.insert(location.clip_index, right_clip);
         clips.insert(location.clip_index, left_clip);
+        self.recompute_duration_seconds();
         true
     }
 
@@ -143,7 +176,9 @@ impl ProjectState {
             return false;
         }
 
+        clip.source_offset_seconds += delta;
         clip.duration_seconds -= delta;
+        self.recompute_duration_seconds();
         true
     }
 
@@ -168,6 +203,7 @@ impl ProjectState {
         }
 
         clip.duration_seconds = new_duration;
+        self.recompute_duration_seconds();
         true
     }
 
@@ -179,6 +215,7 @@ impl ProjectState {
         self.tracks[location.track_index]
             .clips
             .remove(location.clip_index);
+        self.recompute_duration_seconds();
         true
     }
 
@@ -191,6 +228,8 @@ impl ProjectState {
         let original = self.tracks[location.track_index].clips[location.clip_index].clone();
         let duplicate = ClipState {
             id: format!("{}_copy_{}", original.id, self.edit_counter),
+            asset_id: original.asset_id.clone(),
+            source_offset_seconds: original.source_offset_seconds,
             duration_seconds: original.duration_seconds,
             clip_type: original.clip_type,
             split_group_id: None,
@@ -199,6 +238,7 @@ impl ProjectState {
         self.tracks[location.track_index]
             .clips
             .insert(location.clip_index + 1, duplicate);
+        self.recompute_duration_seconds();
         true
     }
 
@@ -206,16 +246,34 @@ impl ProjectState {
         &mut self,
         kind: TrackKind,
         clip_id: &str,
+        asset_id: &str,
         duration_seconds: f64,
         is_media: bool,
     ) -> bool {
-        if duration_seconds <= 0.0 {
+        let resolved_duration = if duration_seconds > 0.0 {
+            duration_seconds
+        } else if is_media {
+            self.assets
+                .get(asset_id)
+                .and_then(|asset| asset.duration_seconds)
+                .unwrap_or(0.0)
+        } else {
+            0.0
+        };
+
+        if resolved_duration <= 0.0 {
             return false;
         }
 
         let clip = ClipState {
             id: clip_id.to_string(),
-            duration_seconds,
+            asset_id: if is_media {
+                Some(asset_id.to_string())
+            } else {
+                None
+            },
+            source_offset_seconds: 0.0,
+            duration_seconds: resolved_duration,
             clip_type: if is_media {
                 ClipType::Media
             } else {
@@ -226,6 +284,7 @@ impl ProjectState {
 
         if let Some(track) = self.tracks.iter_mut().find(|track| track.kind == kind) {
             track.clips.push(clip);
+            self.recompute_duration_seconds();
             return true;
         }
 
@@ -234,7 +293,23 @@ impl ProjectState {
             clips: vec![clip],
         });
         self.tracks.sort_by_key(|track| track_sort_key(track.kind));
+        self.recompute_duration_seconds();
         true
+    }
+
+    fn recompute_duration_seconds(&mut self) {
+        let timeline_duration = self
+            .tracks
+            .iter()
+            .map(|track| {
+                track
+                    .clips
+                    .iter()
+                    .map(|clip| clip.duration_seconds)
+                    .sum::<f64>()
+            })
+            .fold(0.0, f64::max);
+        self.duration_seconds = self.base_duration_seconds.max(timeline_duration);
     }
 
     fn find_clip(&self, clip_id: &str) -> Option<ClipLocation> {
@@ -265,7 +340,9 @@ impl Default for ProjectState {
             height: 0,
             fps: 30.0,
             sample_rate: 48_000,
+            base_duration_seconds: 0.0,
             duration_seconds: 0.0,
+            assets: HashMap::new(),
             tracks: build_default_tracks(),
             edit_counter: 0,
         }
@@ -298,9 +375,9 @@ mod tests {
     fn inserts_tracks_in_expected_order() {
         let mut project = project();
 
-        assert!(project.insert_clip(TrackKind::Audio, "audio-1", 1.2, true));
-        assert!(project.insert_clip(TrackKind::Video, "video-1", 3.0, true));
-        assert!(project.insert_clip(TrackKind::Text, "text-1", 1.0, false));
+        assert!(project.insert_clip(TrackKind::Audio, "audio-1", "audio-1", 1.2, true));
+        assert!(project.insert_clip(TrackKind::Video, "video-1", "video-1", 3.0, true));
+        assert!(project.insert_clip(TrackKind::Text, "text-1", "text-1", 1.0, false));
 
         assert_eq!(project.tracks.len(), 3);
         assert_eq!(project.tracks[0].kind, TrackKind::Video);
@@ -309,9 +386,20 @@ mod tests {
     }
 
     #[test]
+    fn project_duration_tracks_longest_timeline_and_resets_to_base() {
+        let mut project = project();
+
+        assert!(project.insert_clip(TrackKind::Video, "video-1", "video-1", 19.0, true));
+        assert_eq!(project.duration_seconds, 19.0);
+
+        assert!(project.delete_clip("video-1"));
+        assert_eq!(project.duration_seconds, 5.0);
+    }
+
+    #[test]
     fn splits_video_clip_into_two_segments() {
         let mut project = project();
-        assert!(project.insert_clip(TrackKind::Video, "video-1", 3.15, true));
+        assert!(project.insert_clip(TrackKind::Video, "video-1", "video-1", 3.15, true));
 
         assert!(project.split_clip("video-1", 1.4));
 
@@ -334,8 +422,8 @@ mod tests {
     #[test]
     fn trims_delete_and_duplicate_work() {
         let mut project = project();
-        assert!(project.insert_clip(TrackKind::Video, "video-1", 3.15, true));
-        assert!(project.insert_clip(TrackKind::Video, "video-2", 0.72, true));
+        assert!(project.insert_clip(TrackKind::Video, "video-1", "video-1", 3.15, true));
+        assert!(project.insert_clip(TrackKind::Video, "video-2", "video-2", 0.72, true));
 
         assert!(project.trim_clip_left("video-1", 0.9));
         assert!(project.trim_clip_right("video-1", 1.5));

@@ -51,10 +51,20 @@ uint8_t fusion_video_engine_duplicate_clip(
     int64_t handle,
     const char* clip_id
 );
+uint8_t fusion_video_engine_import_asset(
+    int64_t handle,
+    const char* asset_id,
+    const char* uri,
+    uint8_t track_kind,
+    double duration_seconds,
+    int32_t width,
+    int32_t height
+);
 uint8_t fusion_video_engine_insert_clip(
     int64_t handle,
     uint8_t track_kind,
     const char* clip_id,
+    const char* asset_id,
     double duration_seconds,
     uint8_t is_media
 );

@@ -1,14 +1,14 @@
 import 'dart:async';
-import 'dart:io';
-import 'dart:ui' as ui;
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
-import 'package:video_player/video_player.dart';
 
 import '../../../../core/engine/engine_contract.dart';
 import '../../../../core/engine/engine_session_controller.dart';
+import '../../../../core/media/local_media_probe.dart';
+import '../../../../core/preview/native_preview_backend.dart';
+import '../../../../core/preview/preview_backend.dart';
 import '../../../../core/theme/app_theme.dart';
 import '../models/editor_media_tab.dart';
 import '../models/mock_asset_item.dart';
@@ -34,10 +34,10 @@ class _MobileEditorScreenState extends State<MobileEditorScreen> {
   EditorMediaTab activeTab = EditorMediaTab.video;
   late final FusionVideoEngineSessionController _engineController;
   late final ValueNotifier<List<MockAssetItem>> _assetLibrary;
-  VideoPlayerController? _previewVideoController;
+  late final FusionPreviewBackend _previewBackend;
   String? _previewAssetId;
   Size? _workspaceSize;
-  bool _isSyncingVideoFromTimeline = false;
+  bool _isSyncingPreviewFromTimeline = false;
   bool _isTimelineScrubbing = false;
   DateTime? _lastPreviewSyncAt;
   Timer? _previewSeekDebounce;
@@ -59,23 +59,122 @@ class _MobileEditorScreenState extends State<MobileEditorScreen> {
     _assetLibrary = ValueNotifier<List<MockAssetItem>>(
       const <MockAssetItem>[],
     );
+    _previewBackend = NativePreviewBackend(projectId: 1);
     _engineController.addListener(_handleEngineChanged);
+    _previewBackend.addListener(_handlePreviewBackendChanged);
     unawaited(_engineController.initialize());
+  }
+
+  MockAssetItem? _findAssetById(String id) {
+    for (final asset in _assetLibrary.value) {
+      if (asset.id == id) {
+        return asset;
+      }
+    }
+    return null;
+  }
+
+  MockAssetItem? _assetFromDescriptor(EngineAssetDescriptor descriptor) {
+    final existing = _findAssetById(descriptor.id);
+    if (existing != null) {
+      return existing;
+    }
+    return MockAssetItem(
+      id: descriptor.id,
+      tab: switch (descriptor.kind) {
+        EngineTrackKind.video => EditorMediaTab.video,
+        EngineTrackKind.image => EditorMediaTab.image,
+        EngineTrackKind.audio => EditorMediaTab.audio,
+        EngineTrackKind.text => EditorMediaTab.text,
+        EngineTrackKind.lipSync => EditorMediaTab.lipSync,
+        EngineTrackKind.effect => EditorMediaTab.video,
+      },
+      label: descriptor.uri.split('/').last,
+      tone: 80,
+      localPath: descriptor.uri,
+      isImported: true,
+      durationSeconds: descriptor.durationSeconds,
+      width: descriptor.width,
+      height: descriptor.height,
+    );
+  }
+
+  Future<EngineVisualBinding?> _currentPreviewBinding({
+    double? projectSeconds,
+  }) async {
+    EngineVisualBinding? targetBinding;
+    final selectedClipId = _engineController.selectedClipId;
+    final seconds = projectSeconds ?? _engineController.currentSeconds;
+    if (selectedClipId != null && !_engineController.isPlaying) {
+      targetBinding = _engineController.visualBindingForClipId(
+        selectedClipId,
+        projectSeconds: seconds,
+      );
+    }
+    targetBinding ??= _engineController.activeVisualBindingAt(seconds);
+    return targetBinding;
+  }
+
+  Future<void> _syncPreviewFromEngineState() async {
+    final targetBinding = await _currentPreviewBinding();
+
+    final currentSource = _previewBackend.state.source;
+    if (targetBinding == null) {
+      _previewAssetId = null;
+      if (currentSource != null) {
+        await _previewBackend.attachSource(null);
+      }
+      return;
+    }
+
+    final targetAsset = _assetFromDescriptor(targetBinding.asset);
+    if (targetAsset == null || !targetAsset.isVisual) {
+      return;
+    }
+
+    final targetSource = _previewSourceForBinding(targetBinding);
+    if (_shouldAttachPreviewSource(currentSource, targetSource)) {
+      await _activatePreviewForAsset(
+        targetAsset,
+        previewSource: targetSource,
+      );
+    } else {
+      _previewAssetId = targetAsset.id;
+    }
+
+    final previewState = _previewBackend.state;
+    final localPositionSeconds = targetBinding.sourcePositionSeconds;
+    final delta = (localPositionSeconds - previewState.positionSeconds).abs();
+    final shouldForce = !_engineController.isPlaying && !_isTimelineScrubbing;
+    if (_engineController.isPlaying != previewState.isPlaying ||
+        delta > (_engineController.isPlaying ? 0.14 : 0.02) ||
+        shouldForce) {
+      await _previewBackend.syncTransport(
+        positionSeconds: localPositionSeconds,
+        isPlaying: _engineController.isPlaying,
+        force: shouldForce,
+      );
+    }
   }
 
   @override
   void dispose() {
     _engineController.removeListener(_handleEngineChanged);
+    _previewBackend.removeListener(_handlePreviewBackendChanged);
     unawaited(_engineController.shutdown());
     _previewSeekDebounce?.cancel();
-    _previewVideoController?.removeListener(_handlePreviewVideoChanged);
-    unawaited(_previewVideoController?.dispose() ?? Future<void>.value());
+    unawaited(_previewBackend.disposeBackend());
     _engineController.dispose();
     _assetLibrary.dispose();
     super.dispose();
   }
 
   void _handleEngineChanged() {
+    final handle = _engineController.projectHandle;
+    if (handle != null) {
+      unawaited(_previewBackend.bindProject(handle.id));
+    }
+    unawaited(_syncPreviewFromEngineState());
     if (!mounted) {
       return;
     }
@@ -85,11 +184,18 @@ class _MobileEditorScreenState extends State<MobileEditorScreen> {
 
   void _setCurrentSeconds(double value) {
     unawaited(_engineController.seekSeconds(value));
-    final controller = _previewVideoController;
-    if (controller != null &&
-        controller.value.isInitialized &&
-        !controller.value.isPlaying) {
-      _schedulePreviewSeek(value, immediate: !_isTimelineScrubbing);
+    final previewState = _previewBackend.state;
+    if (previewState.isReady && !previewState.isPlaying) {
+      unawaited(() async {
+        final binding = await _currentPreviewBinding(projectSeconds: value);
+        if (binding == null) {
+          return;
+        }
+        _schedulePreviewSeek(
+          binding.sourcePositionSeconds,
+          immediate: !_isTimelineScrubbing,
+        );
+      }());
     }
   }
 
@@ -111,22 +217,23 @@ class _MobileEditorScreenState extends State<MobileEditorScreen> {
     if (_previewSeekInFlight) {
       return;
     }
-    final controller = _previewVideoController;
     final pending = _pendingPreviewSeekSeconds;
-    if (controller == null ||
-        !controller.value.isInitialized ||
-        pending == null) {
+    if (!_previewBackend.state.isReady || pending == null) {
       return;
     }
     _pendingPreviewSeekSeconds = null;
     _previewSeekInFlight = true;
-    _isSyncingVideoFromTimeline = true;
+    _isSyncingPreviewFromTimeline = true;
     unawaited(
-      controller
-          .seekTo(Duration(milliseconds: (pending * 1000).round()))
+      _previewBackend
+          .syncTransport(
+        positionSeconds: pending,
+        isPlaying: false,
+        force: true,
+      )
           .whenComplete(() {
         _previewSeekInFlight = false;
-        _isSyncingVideoFromTimeline = false;
+        _isSyncingPreviewFromTimeline = false;
         if (_pendingPreviewSeekSeconds != null) {
           _previewSeekDebounce =
               Timer(const Duration(milliseconds: 16), _flushPreviewSeek);
@@ -139,30 +246,19 @@ class _MobileEditorScreenState extends State<MobileEditorScreen> {
   }
 
   double get _effectiveCurrentSeconds {
-    final controller = _previewVideoController;
-    if (controller != null && controller.value.isInitialized) {
-      return controller.value.position.inMicroseconds /
-          Duration.microsecondsPerSecond;
-    }
     return _engineController.currentSeconds;
   }
 
   bool get _effectiveIsPlaying {
-    final controller = _previewVideoController;
-    if (controller != null && controller.value.isInitialized) {
-      return controller.value.isPlaying;
-    }
     return _engineController.isPlaying;
   }
 
   double get _effectiveTimelineDuration {
-    final controller = _previewVideoController;
     final engineDuration = _engineController.durationSeconds;
-    if (controller == null || !controller.value.isInitialized) {
+    final previewDuration = _previewBackend.state.durationSeconds;
+    if (previewDuration <= 0) {
       return engineDuration;
     }
-    final previewDuration = controller.value.duration.inMicroseconds /
-        Duration.microsecondsPerSecond;
     return previewDuration > engineDuration ? previewDuration : engineDuration;
   }
 
@@ -184,23 +280,37 @@ class _MobileEditorScreenState extends State<MobileEditorScreen> {
     if (size != null && size.height > 0) {
       return size.width / size.height;
     }
+    final previewAspect = _previewBackend.state.aspectRatio;
+    if (previewAspect != null && previewAspect > 0) {
+      return previewAspect;
+    }
     return _previewAsset?.aspectRatio;
   }
 
   Future<void> _togglePlayback() async {
-    final controller = _previewVideoController;
-    if (controller != null && controller.value.isInitialized) {
-      if (controller.value.isPlaying) {
-        await controller.pause();
+    final previewState = _previewBackend.state;
+    if (previewState.isReady) {
+      final binding = await _currentPreviewBinding();
+      final localSeconds =
+          binding?.sourcePositionSeconds ?? previewState.positionSeconds;
+      if (previewState.isPlaying) {
         await _engineController.pause();
+        await _previewBackend.syncTransport(
+          positionSeconds: localSeconds,
+          isPlaying: false,
+          force: true,
+        );
       } else {
-        if (controller.value.position >= controller.value.duration &&
-            controller.value.duration > Duration.zero) {
-          await controller.seekTo(Duration.zero);
+        if (previewState.durationSeconds > 0 &&
+            previewState.positionSeconds >= previewState.durationSeconds) {
           await _engineController.seekSeconds(0);
         }
-        await controller.play();
         await _engineController.play();
+        await _previewBackend.syncTransport(
+          positionSeconds: localSeconds,
+          isPlaying: true,
+          force: true,
+        );
       }
       if (mounted) {
         setState(() {});
@@ -218,35 +328,46 @@ class _MobileEditorScreenState extends State<MobileEditorScreen> {
 
   void _handleClipSelected(String clipId) {
     _engineController.selectClip(clipId);
-    MockAssetItem? asset;
-    for (final item in _assetLibrary.value) {
-      if (item.id == clipId) {
-        asset = item;
-        break;
-      }
-    }
+    final binding = _engineController.visualBindingForClipId(
+      clipId,
+      projectSeconds: _engineController.currentSeconds,
+    );
+    final asset = binding == null
+        ? _findAssetById(clipId)
+        : _assetFromDescriptor(binding.asset);
     if (asset != null && asset.isVisual) {
-      unawaited(_activatePreviewForAsset(asset));
+      unawaited(
+        _activatePreviewForAsset(
+          asset,
+          previewSource:
+              binding == null ? null : _previewSourceForBinding(binding),
+        ),
+      );
     }
   }
 
-  void _handlePreviewVideoChanged() {
-    final controller = _previewVideoController;
-    if (!mounted || controller == null || !controller.value.isInitialized) {
+  void _handlePreviewBackendChanged() {
+    if (!mounted) {
       return;
     }
 
-    if (!controller.value.isPlaying &&
+    final previewState = _previewBackend.state;
+    if (previewState.contentSize != null &&
+        previewState.contentSize!.width > 0 &&
+        previewState.contentSize!.height > 0) {
+      _workspaceSize = previewState.contentSize;
+    }
+
+    if (!previewState.isPlaying &&
         _engineController.isPlaying &&
-        controller.value.duration > Duration.zero &&
-        controller.value.position >=
-            controller.value.duration - const Duration(milliseconds: 40)) {
+        previewState.durationSeconds > 0 &&
+        previewState.positionSeconds >= previewState.durationSeconds - 0.04) {
       unawaited(_engineController.pause());
     }
 
     setState(() {});
 
-    if (_isSyncingVideoFromTimeline) {
+    if (_isSyncingPreviewFromTimeline) {
       return;
     }
 
@@ -257,7 +378,7 @@ class _MobileEditorScreenState extends State<MobileEditorScreen> {
       return;
     }
     _lastPreviewSyncAt = now;
-    unawaited(_engineController.seekSeconds(_effectiveCurrentSeconds));
+    unawaited(_engineController.seekSeconds(previewState.positionSeconds));
   }
 
   void _handleTimelineScrubStateChanged(bool isActive) {
@@ -286,25 +407,37 @@ class _MobileEditorScreenState extends State<MobileEditorScreen> {
         (asset.durationSeconds == null ||
             asset.width == null ||
             asset.height == null)) {
-      final metadata = await _readVideoMetadata(asset.localPath!);
-      final updatedAsset = asset.copyWith(
-        durationSeconds: metadata.durationSeconds,
-        width: metadata.width,
-        height: metadata.height,
-      );
-      _replaceAsset(updatedAsset);
-      return updatedAsset;
+      try {
+        final metadata = await _readVideoMetadata(asset.localPath!);
+        final updatedAsset = asset.copyWith(
+          durationSeconds: metadata.durationSeconds,
+          width: metadata.width,
+          height: metadata.height,
+        );
+        _replaceAsset(updatedAsset);
+        return updatedAsset;
+      } catch (error, stackTrace) {
+        debugPrint('Fusion Video: video metadata probe failed: $error');
+        debugPrintStack(stackTrace: stackTrace);
+        return asset;
+      }
     }
 
     if (asset.tab == EditorMediaTab.image &&
         (asset.width == null || asset.height == null)) {
-      final metadata = await _readImageMetadata(asset.localPath!);
-      final updatedAsset = asset.copyWith(
-        width: metadata.width,
-        height: metadata.height,
-      );
-      _replaceAsset(updatedAsset);
-      return updatedAsset;
+      try {
+        final metadata = await _readImageMetadata(asset.localPath!);
+        final updatedAsset = asset.copyWith(
+          width: metadata.width,
+          height: metadata.height,
+        );
+        _replaceAsset(updatedAsset);
+        return updatedAsset;
+      } catch (error, stackTrace) {
+        debugPrint('Fusion Video: image metadata probe failed: $error');
+        debugPrintStack(stackTrace: stackTrace);
+        return asset;
+      }
     }
 
     return asset;
@@ -313,6 +446,7 @@ class _MobileEditorScreenState extends State<MobileEditorScreen> {
   Future<void> _activatePreviewForAsset(
     MockAssetItem asset, {
     bool autoplay = false,
+    PreviewSource? previewSource,
   }) async {
     if (!asset.isVisual) {
       return;
@@ -331,76 +465,74 @@ class _MobileEditorScreenState extends State<MobileEditorScreen> {
       );
     }
 
-    if (preparedAsset.tab == EditorMediaTab.video &&
+    if ((preparedAsset.tab == EditorMediaTab.video ||
+            preparedAsset.tab == EditorMediaTab.image) &&
         preparedAsset.localPath != null) {
-      final previousController = _previewVideoController;
-      previousController?.removeListener(_handlePreviewVideoChanged);
-      await previousController?.dispose();
-
-      final controller =
-          VideoPlayerController.file(File(preparedAsset.localPath!));
-      await controller.initialize();
-      await controller.setLooping(false);
-      final videoSize = controller.value.size;
-      if (videoSize.width > 0 && videoSize.height > 0) {
-        _workspaceSize = Size(videoSize.width, videoSize.height);
-      }
-      controller.addListener(_handlePreviewVideoChanged);
-      _previewVideoController = controller;
-      if (autoplay) {
-        await controller.play();
-      }
-      if (mounted) {
-        setState(() {});
-      }
-      return;
+      await _previewBackend.attachSource(
+        previewSource ?? _previewSourceForAsset(preparedAsset),
+        autoplay: autoplay,
+      );
+    } else {
+      await _previewBackend.attachSource(null);
     }
-
-    final previousController = _previewVideoController;
-    previousController?.removeListener(_handlePreviewVideoChanged);
-    await previousController?.dispose();
-    _previewVideoController = null;
     if (mounted) {
       setState(() {});
     }
   }
 
-  Widget _buildPreviewContent() {
-    final asset = _previewAsset;
-    if (asset == null) {
-      return const SizedBox.expand();
+  PreviewSource _previewSourceForAsset(MockAssetItem asset) {
+    return PreviewSource(
+      id: asset.id,
+      assetId: asset.id,
+      kind: asset.tab == EditorMediaTab.video
+          ? PreviewSourceKind.video
+          : PreviewSourceKind.image,
+      localPath: asset.localPath!,
+      durationSeconds: asset.durationSeconds,
+      width: asset.width,
+      height: asset.height,
+      sourceStartSeconds: 0,
+      sourceEndSeconds: asset.durationSeconds,
+      clipDurationSeconds: asset.durationSeconds,
+    );
+  }
+
+  PreviewSource _previewSourceForBinding(EngineVisualBinding binding) {
+    return PreviewSource(
+      id: binding.clipId,
+      assetId: binding.asset.id,
+      kind: binding.asset.kind == EngineTrackKind.video
+          ? PreviewSourceKind.video
+          : PreviewSourceKind.image,
+      localPath: binding.asset.uri,
+      durationSeconds: binding.asset.durationSeconds,
+      width: binding.asset.width,
+      height: binding.asset.height,
+      sourceStartSeconds: binding.sourceStartSeconds,
+      sourceEndSeconds: binding.sourceEndSeconds,
+      clipDurationSeconds: binding.clipDurationSeconds,
+    );
+  }
+
+  bool _shouldAttachPreviewSource(
+    PreviewSource? current,
+    PreviewSource target,
+  ) {
+    if (current == null) {
+      return true;
     }
 
-    if (asset.tab == EditorMediaTab.video) {
-      final controller = _previewVideoController;
-      if (controller == null || !controller.value.isInitialized) {
-        return const SizedBox.expand();
-      }
-
-      final videoSize = controller.value.size;
-      return SizedBox.expand(
-        child: FittedBox(
-          fit: BoxFit.cover,
-          child: SizedBox(
-            width: videoSize.width,
-            height: videoSize.height,
-            child: VideoPlayer(controller),
-          ),
-        ),
-      );
-    }
-
-    if (asset.tab == EditorMediaTab.image && asset.localPath != null) {
-      return SizedBox.expand(
-        child: Image.file(
-          File(asset.localPath!),
-          fit: BoxFit.cover,
-          errorBuilder: (_, __, ___) => const SizedBox.expand(),
-        ),
-      );
-    }
-
-    return const SizedBox.expand();
+    return current.id != target.id ||
+        current.localPath != target.localPath ||
+        current.kind != target.kind ||
+        (current.sourceStartSeconds - target.sourceStartSeconds).abs() >
+            0.001 ||
+        ((current.sourceEndSeconds ?? 0) - (target.sourceEndSeconds ?? 0))
+                .abs() >
+            0.001 ||
+        ((current.clipDurationSeconds ?? 0) - (target.clipDurationSeconds ?? 0))
+                .abs() >
+            0.001;
   }
 
   Future<void> _openMediaSheet(EditorMediaTab tab) async {
@@ -461,6 +593,18 @@ class _MobileEditorScreenState extends State<MobileEditorScreen> {
       );
 
       _assetLibrary.value = [..._assetLibrary.value, newAsset];
+      final handle = _engineController.projectHandle;
+      if (handle != null) {
+        await _engineController.importAsset(
+          EngineAssetDescriptor(
+            id: newAsset.id,
+            uri: newAsset.localPath ?? '',
+            kind: _engineTrackKindFor(newAsset.tab),
+            width: newAsset.width,
+            height: newAsset.height,
+          ),
+        );
+      }
 
       if (!mounted) {
         return;
@@ -543,46 +687,71 @@ class _MobileEditorScreenState extends State<MobileEditorScreen> {
       return;
     }
 
-    final preparedAsset = await _ensureAssetMetadata(asset);
-    final durationSeconds =
-        preparedAsset.durationSeconds ?? _defaultDurationFor(preparedAsset.tab);
-    final trackKind = _engineTrackKindFor(preparedAsset.tab);
-    final hadVisualTracks = _engineController.tracks.any(
-      (track) =>
-          (track.kind == TimelineTrackKind.video ||
-              track.kind == TimelineTrackKind.image) &&
-          track.clips.isNotEmpty,
-    );
+    try {
+      final preparedAsset = await _ensureAssetMetadata(asset);
+      await _engineController.importAsset(
+        EngineAssetDescriptor(
+          id: preparedAsset.id,
+          uri: preparedAsset.localPath ?? '',
+          kind: _engineTrackKindFor(preparedAsset.tab),
+          durationSeconds: preparedAsset.durationSeconds,
+          width: preparedAsset.width,
+          height: preparedAsset.height,
+        ),
+      );
+      final durationSeconds = preparedAsset.durationSeconds ??
+          _defaultDurationFor(preparedAsset.tab);
+      final trackKind = _engineTrackKindFor(preparedAsset.tab);
+      final hadVisualTracks = _engineController.tracks.any(
+        (track) =>
+            (track.kind == TimelineTrackKind.video ||
+                track.kind == TimelineTrackKind.image) &&
+            track.clips.isNotEmpty,
+      );
 
-    await _engineController.insertClip(
-      trackKind: trackKind,
-      clipId: preparedAsset.id,
-      durationSeconds: durationSeconds,
-      isMedia: true,
-    );
+      await _engineController.insertClip(
+        trackKind: trackKind,
+        clipId: preparedAsset.id,
+        assetId: preparedAsset.id,
+        durationSeconds: durationSeconds,
+        isMedia: true,
+      );
 
-    if (preparedAsset.isVisual) {
-      if (!hadVisualTracks &&
-          preparedAsset.width != null &&
-          preparedAsset.height != null) {
-        _workspaceSize = Size(
-          preparedAsset.width!.toDouble(),
-          preparedAsset.height!.toDouble(),
-        );
+      if (preparedAsset.isVisual) {
+        if (!hadVisualTracks &&
+            preparedAsset.width != null &&
+            preparedAsset.height != null) {
+          _workspaceSize = Size(
+            preparedAsset.width!.toDouble(),
+            preparedAsset.height!.toDouble(),
+          );
+        }
+        await _activatePreviewForAsset(preparedAsset);
       }
-      await _activatePreviewForAsset(preparedAsset);
-    }
 
-    if (!mounted) {
-      return;
-    }
+      if (!mounted) {
+        return;
+      }
 
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text('${preparedAsset.label} added to timeline'),
-        duration: const Duration(milliseconds: 1000),
-      ),
-    );
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('${preparedAsset.label} added to timeline'),
+          duration: const Duration(milliseconds: 1000),
+        ),
+      );
+    } catch (error, stackTrace) {
+      debugPrint('Fusion Video: add asset to timeline failed: $error');
+      debugPrintStack(stackTrace: stackTrace);
+      if (!mounted) {
+        return;
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Add to timeline failed: $error'),
+          duration: const Duration(milliseconds: 2200),
+        ),
+      );
+    }
   }
 
   EngineTrackKind _engineTrackKindFor(EditorMediaTab tab) {
@@ -631,32 +800,20 @@ class _MobileEditorScreenState extends State<MobileEditorScreen> {
   }
 
   Future<_ImportedAssetMetadata> _readVideoMetadata(String path) async {
-    final controller = VideoPlayerController.file(File(path));
-    try {
-      await controller.initialize();
-      final value = controller.value;
-      return _ImportedAssetMetadata(
-        durationSeconds:
-            value.duration.inMicroseconds / Duration.microsecondsPerSecond,
-        width: value.size.width.round(),
-        height: value.size.height.round(),
-      );
-    } finally {
-      await controller.dispose();
-    }
+    final metadata = await probeVideoMetadata(path);
+    return _ImportedAssetMetadata(
+      durationSeconds: metadata.durationSeconds,
+      width: metadata.width,
+      height: metadata.height,
+    );
   }
 
   Future<_ImportedAssetMetadata> _readImageMetadata(String path) async {
-    final bytes = await File(path).readAsBytes();
-    final codec = await ui.instantiateImageCodec(bytes);
-    final frame = await codec.getNextFrame();
-    final metadata = _ImportedAssetMetadata(
-      width: frame.image.width,
-      height: frame.image.height,
+    final metadata = await probeImageMetadata(path);
+    return _ImportedAssetMetadata(
+      width: metadata.width,
+      height: metadata.height,
     );
-    frame.image.dispose();
-    codec.dispose();
-    return metadata;
   }
 
   @override
@@ -682,7 +839,7 @@ class _MobileEditorScreenState extends State<MobileEditorScreen> {
                       constraints: const BoxConstraints(minHeight: 220),
                       child: PreviewStage(
                         workspaceAspectRatio: _workspaceAspectRatio,
-                        child: _buildPreviewContent(),
+                        child: _previewBackend.buildView(),
                       ),
                     ),
                   ),

@@ -71,9 +71,18 @@ void main() {
     final controller = buildController();
 
     await controller.initialize();
+    await controller.importAsset(
+      const EngineAssetDescriptor(
+        id: 'video-1',
+        uri: '/tmp/video-1.mp4',
+        kind: EngineTrackKind.video,
+        durationSeconds: 3.15,
+      ),
+    );
     await controller.insertClip(
       trackKind: EngineTrackKind.video,
       clipId: 'video-1',
+      assetId: 'video-1',
       durationSeconds: 3.15,
     );
     await controller.seekSeconds(1.4);
@@ -90,6 +99,8 @@ void main() {
     expect(rightClip.type, TimelineClipType.media);
     expect(leftClip.splitGroupId, isNotNull);
     expect(rightClip.splitGroupId, leftClip.splitGroupId);
+    expect(leftClip.sourceOffsetSeconds, closeTo(0, 0.001));
+    expect(rightClip.sourceOffsetSeconds, closeTo(1.4, 0.1));
     expect(controller.selectedClipId, rightClip.id);
 
     await controller.shutdown();
@@ -101,14 +112,32 @@ void main() {
     final controller = buildController();
 
     await controller.initialize();
+    await controller.importAsset(
+      const EngineAssetDescriptor(
+        id: 'video-1',
+        uri: '/tmp/video-1.mp4',
+        kind: EngineTrackKind.video,
+        durationSeconds: 3.15,
+      ),
+    );
+    await controller.importAsset(
+      const EngineAssetDescriptor(
+        id: 'video-2',
+        uri: '/tmp/video-2.mp4',
+        kind: EngineTrackKind.video,
+        durationSeconds: 0.72,
+      ),
+    );
     await controller.insertClip(
       trackKind: EngineTrackKind.video,
       clipId: 'video-1',
+      assetId: 'video-1',
       durationSeconds: 3.15,
     );
     await controller.insertClip(
       trackKind: EngineTrackKind.video,
       clipId: 'video-2',
+      assetId: 'video-2',
       durationSeconds: 0.72,
     );
     controller.selectClip('video-1');
@@ -134,6 +163,74 @@ void main() {
     await controller.deleteSelectedClip();
     expect(controller.tracks.first.clips.length, beforeDuplicate);
     expect(controller.selectedClipId, isNot(duplicatedId));
+
+    await controller.shutdown();
+    controller.dispose();
+  });
+
+  test('visual binding resolves local media time after split and trim',
+      () async {
+    final controller = buildController();
+
+    await controller.initialize();
+    await controller.importAsset(
+      const EngineAssetDescriptor(
+        id: 'video-1',
+        uri: '/tmp/video-1.mp4',
+        kind: EngineTrackKind.video,
+        durationSeconds: 4,
+      ),
+    );
+    await controller.insertClip(
+      trackKind: EngineTrackKind.video,
+      clipId: 'video-1',
+      assetId: 'video-1',
+      durationSeconds: 4,
+    );
+
+    await controller.seekSeconds(1.5);
+    await settleEngine();
+    await controller.splitSelectedClip();
+
+    final rightClipId = controller.selectedClipId!;
+    await controller.seekSeconds(2.0);
+    await settleEngine();
+
+    final binding = controller.visualBindingForClipId(
+      rightClipId,
+      projectSeconds: controller.currentSeconds,
+    );
+    expect(binding, isNotNull);
+    final resolvedBinding = binding!;
+    expect(resolvedBinding.sourceStartSeconds, closeTo(1.5, 0.1));
+    expect(resolvedBinding.sourceEndSeconds, closeTo(4.0, 0.1));
+    expect(resolvedBinding.sourcePositionSeconds, closeTo(2.0, 0.1));
+
+    await controller.shutdown();
+    controller.dispose();
+  });
+
+  test('project duration expands to match imported media clip duration',
+      () async {
+    final controller = buildController();
+
+    await controller.initialize();
+    await controller.importAsset(
+      const EngineAssetDescriptor(
+        id: 'video-19',
+        uri: '/tmp/video-19.mp4',
+        kind: EngineTrackKind.video,
+        durationSeconds: 19.0,
+      ),
+    );
+    await controller.insertClip(
+      trackKind: EngineTrackKind.video,
+      clipId: 'video-19',
+      assetId: 'video-19',
+      durationSeconds: 19.0,
+    );
+
+    expect(controller.durationSeconds, closeTo(19.0, 0.001));
 
     await controller.shutdown();
     controller.dispose();
