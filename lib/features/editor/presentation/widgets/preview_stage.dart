@@ -7,10 +7,12 @@ class PreviewStage extends StatelessWidget {
     super.key,
     required this.workspaceAspectRatio,
     required this.child,
+    this.overlay,
   });
 
   final double? workspaceAspectRatio;
   final Widget child;
+  final Widget? overlay;
 
   @override
   Widget build(BuildContext context) {
@@ -35,9 +37,12 @@ class PreviewStage extends StatelessWidget {
             child: SizedBox(
               width: targetWidth,
               height: targetHeight,
-              child: ColoredBox(
-                color: Colors.black,
-                child: child,
+              child: Stack(
+                fit: StackFit.expand,
+                children: [
+                  child,
+                  if (overlay != null) overlay!,
+                ],
               ),
             ),
           ),

@@ -71,6 +71,8 @@ class FusionVideoEngineStub implements FusionVideoEngineBridge {
             isMedia: request.isMedia,
             assetId: request.assetId,
             sourceOffsetSeconds: 0,
+            audioGain: 1.0,
+            isMuted: false,
           ),
         ],
       );
@@ -85,6 +87,8 @@ class FusionVideoEngineStub implements FusionVideoEngineBridge {
               isMedia: request.isMedia,
               assetId: request.assetId,
               sourceOffsetSeconds: 0,
+              audioGain: 1.0,
+              isMuted: false,
             ),
           ],
         ),
@@ -149,6 +153,8 @@ class FusionVideoEngineStub implements FusionVideoEngineBridge {
               assetId: location.clip.assetId,
               sourceOffsetSeconds: location.clip.sourceOffsetSeconds ?? 0,
               splitGroupId: splitGroupId,
+              audioGain: location.clip.audioGain,
+              isMuted: location.clip.isMuted,
             ),
             EngineTimelineClipSnapshot(
               id: '${location.clip.id}_b_$stamp',
@@ -158,6 +164,8 @@ class FusionVideoEngineStub implements FusionVideoEngineBridge {
               sourceOffsetSeconds:
                   (location.clip.sourceOffsetSeconds ?? 0) + leftDuration,
               splitGroupId: splitGroupId,
+              audioGain: location.clip.audioGain,
+              isMuted: location.clip.isMuted,
             ),
           ]);
 
@@ -198,6 +206,8 @@ class FusionVideoEngineStub implements FusionVideoEngineBridge {
       assetId: location.clip.assetId,
       sourceOffsetSeconds: (location.clip.sourceOffsetSeconds ?? 0) + delta,
       splitGroupId: location.clip.splitGroupId,
+      audioGain: location.clip.audioGain,
+      isMuted: location.clip.isMuted,
     );
     _replaceTrack(
       handle.id,
@@ -237,6 +247,8 @@ class FusionVideoEngineStub implements FusionVideoEngineBridge {
       assetId: location.clip.assetId,
       sourceOffsetSeconds: location.clip.sourceOffsetSeconds,
       splitGroupId: location.clip.splitGroupId,
+      audioGain: location.clip.audioGain,
+      isMuted: location.clip.isMuted,
     );
     _replaceTrack(
       handle.id,
@@ -283,11 +295,73 @@ class FusionVideoEngineStub implements FusionVideoEngineBridge {
       assetId: location.clip.assetId,
       sourceOffsetSeconds: location.clip.sourceOffsetSeconds,
       splitGroupId: null,
+      audioGain: location.clip.audioGain,
+      isMuted: location.clip.isMuted,
     );
 
     final nextClips =
         List<EngineTimelineClipSnapshot>.from(location.track.clips)
           ..insert(location.clipIndex + 1, duplicate);
+    _replaceTrack(
+      handle.id,
+      location.trackIndex,
+      EngineTimelineTrackSnapshot(kind: location.track.kind, clips: nextClips),
+    );
+  }
+
+  @override
+  Future<void> setClipGain(
+    EngineProjectHandle handle,
+    String clipId,
+    double gain,
+  ) async {
+    final location = _findClip(handle.id, clipId);
+    if (location == null || !location.clip.isMedia) {
+      return;
+    }
+
+    final nextClips =
+        List<EngineTimelineClipSnapshot>.from(location.track.clips);
+    nextClips[location.clipIndex] = EngineTimelineClipSnapshot(
+      id: location.clip.id,
+      durationSeconds: location.clip.durationSeconds,
+      isMedia: location.clip.isMedia,
+      assetId: location.clip.assetId,
+      sourceOffsetSeconds: location.clip.sourceOffsetSeconds,
+      splitGroupId: location.clip.splitGroupId,
+      audioGain: gain.clamp(0.0, 1.0),
+      isMuted: location.clip.isMuted,
+    );
+    _replaceTrack(
+      handle.id,
+      location.trackIndex,
+      EngineTimelineTrackSnapshot(kind: location.track.kind, clips: nextClips),
+    );
+  }
+
+  @override
+  Future<void> setClipMuted(
+    EngineProjectHandle handle,
+    String clipId,
+    bool muted,
+  ) async {
+    final location = _findClip(handle.id, clipId);
+    if (location == null || !location.clip.isMedia) {
+      return;
+    }
+
+    final nextClips =
+        List<EngineTimelineClipSnapshot>.from(location.track.clips);
+    nextClips[location.clipIndex] = EngineTimelineClipSnapshot(
+      id: location.clip.id,
+      durationSeconds: location.clip.durationSeconds,
+      isMedia: location.clip.isMedia,
+      assetId: location.clip.assetId,
+      sourceOffsetSeconds: location.clip.sourceOffsetSeconds,
+      splitGroupId: location.clip.splitGroupId,
+      audioGain: location.clip.audioGain,
+      isMuted: muted,
+    );
     _replaceTrack(
       handle.id,
       location.trackIndex,
@@ -302,6 +376,126 @@ class FusionVideoEngineStub implements FusionVideoEngineBridge {
     return List<EngineTimelineTrackSnapshot>.from(
       _timelineProjects[handle.id] ?? const [],
     );
+  }
+
+  @override
+  Future<List<EngineCompositionNodeSnapshot>> fetchCompositionNodes(
+    EngineProjectHandle handle,
+    EngineTimelinePosition position,
+  ) async {
+    final tracks = _timelineProjects[handle.id] ?? const [];
+    final assets =
+        _assetProjects[handle.id] ?? const <String, EngineAssetDescriptor>{};
+    final nodes = <EngineCompositionNodeSnapshot>[];
+
+    for (final track in tracks) {
+      if (track.kind == EngineTrackKind.audio ||
+          track.kind == EngineTrackKind.effect) {
+        continue;
+      }
+      var elapsed = 0.0;
+      for (final clip in track.clips) {
+        final start = elapsed;
+        final end = start + clip.durationSeconds;
+        elapsed = end;
+        if (!clip.isMedia) {
+          continue;
+        }
+        if (position.seconds < start || position.seconds > end + 0.0001) {
+          continue;
+        }
+        final assetId = clip.assetId;
+        if (assetId == null) {
+          continue;
+        }
+        final asset = assets[assetId];
+        if (asset == null) {
+          continue;
+        }
+        final sourceStartSeconds = clip.sourceOffsetSeconds ?? 0.0;
+        final sourcePositionSeconds = sourceStartSeconds +
+            (position.seconds - start).clamp(0.0, clip.durationSeconds);
+        nodes.add(
+          EngineCompositionNodeSnapshot(
+            clipId: clip.id,
+            assetId: assetId,
+            trackKind: track.kind,
+            assetUri: asset.uri,
+            displayLabel: asset.label,
+            clipStartSeconds: start,
+            clipEndSeconds: end,
+            clipDurationSeconds: clip.durationSeconds,
+            sourceStartSeconds: sourceStartSeconds,
+            sourceEndSeconds: sourceStartSeconds + clip.durationSeconds,
+            sourcePositionSeconds: sourcePositionSeconds,
+            transform: _defaultTransformFor(asset.kind),
+          ),
+        );
+      }
+    }
+
+    nodes.sort((a, b) => a.transform.zIndex.compareTo(b.transform.zIndex));
+    return nodes;
+  }
+
+  @override
+  Future<List<EngineAudioNodeSnapshot>> fetchAudioNodes(
+    EngineProjectHandle handle,
+    EngineTimelinePosition position,
+  ) async {
+    final tracks = _timelineProjects[handle.id] ?? const [];
+    final assets =
+        _assetProjects[handle.id] ?? const <String, EngineAssetDescriptor>{};
+    final nodes = <EngineAudioNodeSnapshot>[];
+
+    for (final track in tracks) {
+      if (track.kind != EngineTrackKind.audio &&
+          track.kind != EngineTrackKind.video) {
+        continue;
+      }
+      var elapsed = 0.0;
+      for (final clip in track.clips) {
+        final start = elapsed;
+        final end = start + clip.durationSeconds;
+        elapsed = end;
+        if (!clip.isMedia) {
+          continue;
+        }
+        if (position.seconds < start || position.seconds > end + 0.0001) {
+          continue;
+        }
+        final assetId = clip.assetId;
+        if (assetId == null) {
+          continue;
+        }
+        final asset = assets[assetId];
+        if (asset == null) {
+          continue;
+        }
+        final sourceStartSeconds = clip.sourceOffsetSeconds ?? 0.0;
+        final sourcePositionSeconds = sourceStartSeconds +
+            (position.seconds - start).clamp(0.0, clip.durationSeconds);
+        nodes.add(
+          EngineAudioNodeSnapshot(
+            clipId: clip.id,
+            assetId: assetId,
+            trackKind: track.kind,
+            assetUri: asset.uri,
+            displayLabel: asset.label,
+            clipStartSeconds: start,
+            clipEndSeconds: end,
+            clipDurationSeconds: clip.durationSeconds,
+            sourceStartSeconds: sourceStartSeconds,
+            sourceEndSeconds: sourceStartSeconds + clip.durationSeconds,
+            sourcePositionSeconds: sourcePositionSeconds,
+            gain: clip.audioGain,
+            isMuted: clip.isMuted,
+          ),
+        );
+      }
+    }
+
+    return nodes;
   }
 
   @override
@@ -351,6 +545,62 @@ class FusionVideoEngineStub implements FusionVideoEngineBridge {
     );
     current[trackIndex] = nextTrack;
     _timelineProjects[handleId] = current;
+  }
+
+  EngineVisualTransformSnapshot _defaultTransformFor(EngineTrackKind kind) {
+    switch (kind) {
+      case EngineTrackKind.video:
+        return const EngineVisualTransformSnapshot(
+          x: 0,
+          y: 0,
+          width: 1080,
+          height: 1920,
+          opacity: 1,
+          rotationDegrees: 0,
+          zIndex: 0,
+        );
+      case EngineTrackKind.image:
+        return const EngineVisualTransformSnapshot(
+          x: 0,
+          y: 0,
+          width: 1080,
+          height: 1920,
+          opacity: 1,
+          rotationDegrees: 0,
+          zIndex: 10,
+        );
+      case EngineTrackKind.text:
+        return const EngineVisualTransformSnapshot(
+          x: 120,
+          y: 1480,
+          width: 840,
+          height: 220,
+          opacity: 1,
+          rotationDegrees: 0,
+          zIndex: 20,
+        );
+      case EngineTrackKind.lipSync:
+        return const EngineVisualTransformSnapshot(
+          x: 250,
+          y: 1260,
+          width: 580,
+          height: 220,
+          opacity: 1,
+          rotationDegrees: 0,
+          zIndex: 30,
+        );
+      case EngineTrackKind.audio:
+      case EngineTrackKind.effect:
+        return const EngineVisualTransformSnapshot(
+          x: 0,
+          y: 0,
+          width: 0,
+          height: 0,
+          opacity: 1,
+          rotationDegrees: 0,
+          zIndex: 0,
+        );
+    }
   }
 }
 

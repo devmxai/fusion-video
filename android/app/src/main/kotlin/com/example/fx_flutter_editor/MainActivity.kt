@@ -4,20 +4,26 @@ import android.graphics.BitmapFactory
 import android.content.Context
 import android.graphics.Color
 import android.graphics.SurfaceTexture
+import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
 import android.media.MediaMetadataRetriever
 import android.media.MediaPlayer
 import android.os.Bundle
+import android.util.TypedValue
+import android.view.Gravity
 import android.view.Surface
 import android.view.TextureView
 import android.view.View
 import android.widget.FrameLayout
 import android.widget.ImageView
+import android.widget.TextView
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
 import io.flutter.plugin.common.StandardMessageCodec
 import io.flutter.plugin.platform.PlatformView
 import io.flutter.plugin.platform.PlatformViewFactory
+import kotlin.math.roundToInt
 
 class MainActivity : FlutterActivity() {
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
@@ -48,6 +54,18 @@ class MainActivity : FlutterActivity() {
             val sourceKind = args?.get("sourceKind") as? String
             val sourceStartSeconds = (args?.get("sourceStartSeconds") as? Number)?.toDouble()
             val sourceEndSeconds = (args?.get("sourceEndSeconds") as? Number)?.toDouble()
+            val projectWidth = (args?.get("projectWidth") as? Number)?.toInt()
+            val projectHeight = (args?.get("projectHeight") as? Number)?.toInt()
+            val baseClipId = args?.get("baseClipId") as? String
+            val selectedClipId = args?.get("selectedClipId") as? String
+            val sceneNodes = (args?.get("sceneNodes") as? List<*>)
+                ?.mapNotNull { it as? Map<*, *> }
+                ?.map { map ->
+                    map.entries
+                        .filter { it.key is String }
+                        .associate { it.key as String to it.value }
+                }
+                ?: emptyList()
 
             if (projectId == null || positionSeconds == null || isPlaying == null) {
                 result.error("invalid_args", "Missing preview session arguments", null)
@@ -60,6 +78,11 @@ class MainActivity : FlutterActivity() {
                 sourceKind,
                 sourceStartSeconds,
                 sourceEndSeconds,
+                projectWidth,
+                projectHeight,
+                baseClipId,
+                selectedClipId,
+                sceneNodes,
                 positionSeconds,
                 isPlaying,
             )
@@ -85,6 +108,28 @@ class MainActivity : FlutterActivity() {
             }
 
             result.success(FusionMediaProbe.probe(path, kind))
+        }
+
+        MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            "fusion_video/export_session",
+        ).setMethodCallHandler { call, result ->
+            when (call.method) {
+                "startExport" -> result.error(
+                    "unsupported_platform",
+                    "Export foundation is currently implemented on iOS first.",
+                    null,
+                )
+                "pollExport" -> result.success(
+                    mapOf(
+                        "status" to "failed",
+                        "progress" to 0.0,
+                        "errorMessage" to "Export foundation is currently implemented on iOS first.",
+                    )
+                )
+                "cancelExport" -> result.success(null)
+                else -> result.notImplemented()
+            }
         }
     }
 }
@@ -144,6 +189,11 @@ private object FusionPreviewRegistry {
                 it.sourceKind,
                 it.sourceStartSeconds,
                 it.sourceEndSeconds,
+                it.projectWidth,
+                it.projectHeight,
+                it.baseClipId,
+                it.selectedClipId,
+                it.sceneNodes,
                 it.positionSeconds,
                 it.isPlaying,
             )
@@ -160,6 +210,11 @@ private object FusionPreviewRegistry {
         sourceKind: String?,
         sourceStartSeconds: Double?,
         sourceEndSeconds: Double?,
+        projectWidth: Int?,
+        projectHeight: Int?,
+        baseClipId: String?,
+        selectedClipId: String?,
+        sceneNodes: List<Map<String, Any?>>,
         positionSeconds: Double,
         isPlaying: Boolean,
     ) {
@@ -168,6 +223,11 @@ private object FusionPreviewRegistry {
             sourceKind = sourceKind,
             sourceStartSeconds = sourceStartSeconds,
             sourceEndSeconds = sourceEndSeconds,
+            projectWidth = projectWidth,
+            projectHeight = projectHeight,
+            baseClipId = baseClipId,
+            selectedClipId = selectedClipId,
+            sceneNodes = sceneNodes,
             positionSeconds = positionSeconds,
             isPlaying = isPlaying,
         )
@@ -177,6 +237,11 @@ private object FusionPreviewRegistry {
                 sourceKind,
                 sourceStartSeconds,
                 sourceEndSeconds,
+                projectWidth,
+                projectHeight,
+                baseClipId,
+                selectedClipId,
+                sceneNodes,
                 positionSeconds,
                 isPlaying,
             )
@@ -189,6 +254,11 @@ private data class FusionPreviewPayload(
     val sourceKind: String?,
     val sourceStartSeconds: Double?,
     val sourceEndSeconds: Double?,
+    val projectWidth: Int?,
+    val projectHeight: Int?,
+    val baseClipId: String?,
+    val selectedClipId: String?,
+    val sceneNodes: List<Map<String, Any?>>,
     val positionSeconds: Double,
     val isPlaying: Boolean,
 )
@@ -219,12 +289,18 @@ private class FusionPreviewNativeView(
 ) : FrameLayout(context), TextureView.SurfaceTextureListener {
     private val textureView = TextureView(context)
     private val imageView = ImageView(context)
+    private val overlayContainer = FrameLayout(context)
     private var surface: Surface? = null
     private var mediaPlayer: MediaPlayer? = null
     private var currentSourcePath: String? = null
     private var currentSourceKind: String? = null
     private var currentSourceStartSeconds: Double = 0.0
     private var currentSourceEndSeconds: Double? = null
+    private var currentProjectWidth: Int = 0
+    private var currentProjectHeight: Int = 0
+    private var currentBaseClipId: String? = null
+    private var currentSelectedClipId: String? = null
+    private var currentSceneNodes: List<Map<String, Any?>> = emptyList()
     private var currentPositionSeconds: Double = 0.0
     private var isCurrentlyPlaying: Boolean = false
     private var isPrepared: Boolean = false
@@ -260,11 +336,19 @@ private class FusionPreviewNativeView(
             visibility = View.GONE
         }
 
+        overlayContainer.apply {
+            layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT)
+            visibility = View.VISIBLE
+            isClickable = false
+            isFocusable = false
+        }
+
         addView(imageView)
         addView(textureView)
+        addView(overlayContainer)
 
         FusionPreviewRegistry.attach(projectId, this)
-        update(null, null, null, null, 0.0, false)
+        update(null, null, null, null, null, null, null, null, emptyList(), 0.0, false)
     }
 
     fun update(
@@ -272,6 +356,11 @@ private class FusionPreviewNativeView(
         sourceKind: String?,
         sourceStartSeconds: Double?,
         sourceEndSeconds: Double?,
+        projectWidth: Int?,
+        projectHeight: Int?,
+        baseClipId: String?,
+        selectedClipId: String?,
+        sceneNodes: List<Map<String, Any?>>,
         positionSeconds: Double,
         isPlaying: Boolean,
     ) {
@@ -280,11 +369,17 @@ private class FusionPreviewNativeView(
         currentSourceKind = sourceKind
         currentSourceStartSeconds = kotlin.math.max(0.0, sourceStartSeconds ?: 0.0)
         currentSourceEndSeconds = sourceEndSeconds
+        currentProjectWidth = projectWidth ?: 0
+        currentProjectHeight = projectHeight ?: 0
+        currentBaseClipId = baseClipId
+        currentSelectedClipId = selectedClipId
+        currentSceneNodes = sceneNodes
         currentPositionSeconds = positionSeconds
         isCurrentlyPlaying = isPlaying
         if (sourceChanged) {
             loadSource()
         }
+        renderCompositionScene()
         applyTransport()
     }
 
@@ -346,6 +441,134 @@ private class FusionPreviewNativeView(
         }
     }
 
+    private fun renderCompositionScene() {
+        overlayContainer.removeAllViews()
+        if (currentProjectWidth <= 0 || currentProjectHeight <= 0 || width <= 0 || height <= 0) {
+            return
+        }
+
+        val widthScale = width.toFloat() / currentProjectWidth.toFloat()
+        val heightScale = height.toFloat() / currentProjectHeight.toFloat()
+        val sortedNodes = currentSceneNodes.sortedBy {
+            (it["zIndex"] as? Number)?.toInt() ?: 0
+        }
+
+        for (node in sortedNodes) {
+            val clipId = node["clipId"] as? String ?: continue
+            if (clipId == currentBaseClipId) continue
+
+            val nodeWidth = ((node["width"] as? Number)?.toDouble() ?: 0.0)
+            val nodeHeight = ((node["height"] as? Number)?.toDouble() ?: 0.0)
+            if (nodeWidth <= 0.0 || nodeHeight <= 0.0) continue
+
+            val params = LayoutParams(
+                (nodeWidth * widthScale).roundToInt().coerceAtLeast(1),
+                (nodeHeight * heightScale).roundToInt().coerceAtLeast(1),
+            )
+            params.leftMargin =
+                (((node["x"] as? Number)?.toDouble() ?: 0.0) * widthScale).roundToInt()
+            params.topMargin =
+                (((node["y"] as? Number)?.toDouble() ?: 0.0) * heightScale).roundToInt()
+
+            val card = FrameLayout(context).apply {
+                layoutParams = params
+                rotation = ((node["rotationDegrees"] as? Number)?.toFloat() ?: 0f)
+                alpha = ((node["opacity"] as? Number)?.toFloat() ?: 1f).coerceIn(0f, 1f)
+                background = GradientDrawable().apply {
+                    shape = GradientDrawable.RECTANGLE
+                    cornerRadius = 12f * resources.displayMetrics.density
+                    setColor(Color.parseColor("#171717"))
+                    setStroke(
+                        if (clipId == currentSelectedClipId) {
+                            (2f * resources.displayMetrics.density).roundToInt()
+                        } else {
+                            (1f * resources.displayMetrics.density).roundToInt()
+                        },
+                        if (clipId == currentSelectedClipId) {
+                            Color.parseColor("#47E0D4")
+                        } else {
+                            Color.argb(36, 255, 255, 255)
+                        },
+                    )
+                }
+                clipToOutline = true
+                clipChildren = true
+                elevation = 6f * resources.displayMetrics.density
+            }
+
+            val kind = node["kind"] as? String ?: "video"
+            val localPath = node["localPath"] as? String
+            val content = if (kind == "image" && !localPath.isNullOrBlank()) {
+                ImageView(context).apply {
+                    layoutParams = LayoutParams(
+                        LayoutParams.MATCH_PARENT,
+                        LayoutParams.MATCH_PARENT,
+                    )
+                    scaleType = ImageView.ScaleType.CENTER_CROP
+                    setImageBitmap(BitmapFactory.decodeFile(localPath))
+                }
+            } else {
+                buildPlaceholderView(kind)
+            }
+
+            card.addView(content)
+            overlayContainer.addView(card)
+        }
+    }
+
+    private fun buildPlaceholderView(kind: String): View {
+        return FrameLayout(context).apply {
+            layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT)
+            setBackgroundColor(Color.parseColor("#171717"))
+
+            val icon = TextView(context).apply {
+                text = placeholderGlyph(kind)
+                setTextColor(Color.argb(220, 255, 255, 255))
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 22f)
+                gravity = Gravity.CENTER
+                typeface = Typeface.DEFAULT_BOLD
+            }
+            val label = TextView(context).apply {
+                text = placeholderTitle(kind)
+                setTextColor(Color.argb(220, 255, 255, 255))
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                gravity = Gravity.CENTER
+                typeface = Typeface.DEFAULT_BOLD
+            }
+
+            addView(
+                icon,
+                LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT, Gravity.CENTER).apply {
+                    topMargin = (-10f * resources.displayMetrics.density).roundToInt()
+                },
+            )
+            addView(
+                label,
+                LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT, Gravity.CENTER).apply {
+                    topMargin = (22f * resources.displayMetrics.density).roundToInt()
+                },
+            )
+        }
+    }
+
+    private fun placeholderGlyph(kind: String): String {
+        return when (kind) {
+            "image" -> "▣"
+            "text" -> "T"
+            "lipSync" -> "≋"
+            else -> "▶"
+        }
+    }
+
+    private fun placeholderTitle(kind: String): String {
+        return when (kind) {
+            "image" -> "Image"
+            "text" -> "Text"
+            "lipSync" -> "Lip Sync"
+            else -> "Video"
+        }
+    }
+
     private fun applyTransport() {
         val player = mediaPlayer ?: return
         if (!isPrepared) return
@@ -402,6 +625,11 @@ private class FusionPreviewNativeView(
         if (currentSourceKind == "video") {
             prepareVideoPlayer()
         }
+    }
+
+    override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
+        super.onSizeChanged(w, h, oldw, oldh)
+        renderCompositionScene()
     }
 
     override fun onSurfaceTextureSizeChanged(surface: SurfaceTexture, width: Int, height: Int) = Unit

@@ -15,8 +15,16 @@ class FusionPreviewSessionBridge {
     required bool isPlaying,
     String? sourcePath,
     String? sourceKind,
+    double? clipStartSeconds,
+    double? clipEndSeconds,
     double? sourceStartSeconds,
     double? sourceEndSeconds,
+    int? projectWidth,
+    int? projectHeight,
+    String? baseClipId,
+    String? selectedClipId,
+    List<Map<String, dynamic>>? sceneNodes,
+    List<Map<String, dynamic>>? audioNodes,
   }) async {
     if (kIsWeb || !(Platform.isIOS || Platform.isAndroid)) {
       return;
@@ -29,8 +37,16 @@ class FusionPreviewSessionBridge {
         'isPlaying': isPlaying,
         'sourcePath': sourcePath,
         'sourceKind': sourceKind,
+        'clipStartSeconds': clipStartSeconds,
+        'clipEndSeconds': clipEndSeconds,
         'sourceStartSeconds': sourceStartSeconds,
         'sourceEndSeconds': sourceEndSeconds,
+        'projectWidth': projectWidth,
+        'projectHeight': projectHeight,
+        'baseClipId': baseClipId,
+        'selectedClipId': selectedClipId,
+        'sceneNodes': sceneNodes,
+        'audioNodes': audioNodes,
       });
     } on MissingPluginException {
       // Preview bridge is not registered on this platform/runtime yet.

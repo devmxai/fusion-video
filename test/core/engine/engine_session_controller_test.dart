@@ -235,4 +235,145 @@ void main() {
     await controller.shutdown();
     controller.dispose();
   });
+
+  test('composition snapshot resolves visual nodes from engine state',
+      () async {
+    final controller = buildController();
+
+    await controller.initialize();
+    await controller.importAsset(
+      const EngineAssetDescriptor(
+        id: 'video-1',
+        uri: '/tmp/video-1.mp4',
+        kind: EngineTrackKind.video,
+        label: 'video-1.mp4',
+        durationSeconds: 4.0,
+        width: 1080,
+        height: 1920,
+      ),
+    );
+    await controller.insertClip(
+      trackKind: EngineTrackKind.video,
+      clipId: 'video-1',
+      assetId: 'video-1',
+      durationSeconds: 4.0,
+    );
+
+    final nodes = await controller.compositionAt(1.25);
+    expect(nodes, hasLength(1));
+    final node = nodes.first;
+    expect(node.assetId, 'video-1');
+    expect(node.trackKind, EngineTrackKind.video);
+    expect(node.displayLabel, 'video-1.mp4');
+    expect(node.sourcePositionSeconds, closeTo(1.25, 0.001));
+    expect(node.transform.width, closeTo(1080, 0.001));
+    expect(node.transform.height, closeTo(1920, 0.001));
+
+    await controller.shutdown();
+    controller.dispose();
+  });
+
+  test('audio snapshot resolves engine-backed audio nodes', () async {
+    final controller = buildController();
+
+    await controller.initialize();
+    await controller.importAsset(
+      const EngineAssetDescriptor(
+        id: 'audio-1',
+        uri: '/tmp/audio-1.m4a',
+        kind: EngineTrackKind.audio,
+        label: 'audio-1.m4a',
+        durationSeconds: 6.0,
+      ),
+    );
+    await controller.insertClip(
+      trackKind: EngineTrackKind.audio,
+      clipId: 'audio-1',
+      assetId: 'audio-1',
+      durationSeconds: 6.0,
+    );
+
+    await controller.seekSeconds(2.0);
+    await settleEngine();
+    controller.selectClip('audio-1');
+    await controller.splitSelectedClip();
+
+    final nodes = await controller.audioNodesAt(3.5);
+    expect(nodes, hasLength(1));
+    final node = nodes.first;
+    expect(node.assetId, 'audio-1');
+    expect(node.displayLabel, 'audio-1.m4a');
+    expect(node.sourceStartSeconds, closeTo(2.0, 0.001));
+    expect(node.sourcePositionSeconds, closeTo(3.5, 0.001));
+    expect(node.sourceEndSeconds, closeTo(6.0, 0.001));
+
+    await controller.shutdown();
+    controller.dispose();
+  });
+
+  test('video clips also expose audio nodes for mixer foundation', () async {
+    final controller = buildController();
+
+    await controller.initialize();
+    await controller.importAsset(
+      const EngineAssetDescriptor(
+        id: 'video-audio-1',
+        uri: '/tmp/video-audio-1.mp4',
+        kind: EngineTrackKind.video,
+        label: 'video-audio-1.mp4',
+        durationSeconds: 5.0,
+      ),
+    );
+    await controller.insertClip(
+      trackKind: EngineTrackKind.video,
+      clipId: 'video-audio-1',
+      assetId: 'video-audio-1',
+      durationSeconds: 5.0,
+    );
+
+    final nodes = await controller.audioNodesAt(1.25);
+    expect(nodes, hasLength(1));
+    final node = nodes.first;
+    expect(node.assetId, 'video-audio-1');
+    expect(node.trackKind, EngineTrackKind.video);
+    expect(node.displayLabel, 'video-audio-1.mp4');
+    expect(node.sourcePositionSeconds, closeTo(1.25, 0.001));
+
+    await controller.shutdown();
+    controller.dispose();
+  });
+
+  test('audio controls flow from engine into audio snapshot', () async {
+    final controller = buildController();
+
+    await controller.initialize();
+    await controller.importAsset(
+      const EngineAssetDescriptor(
+        id: 'video-audio-1',
+        uri: '/tmp/video-audio-1.mp4',
+        kind: EngineTrackKind.video,
+        label: 'video-audio-1.mp4',
+        durationSeconds: 5.0,
+        width: 1080,
+        height: 1920,
+      ),
+    );
+    await controller.insertClip(
+      trackKind: EngineTrackKind.video,
+      clipId: 'video-audio-1',
+      assetId: 'video-audio-1',
+      durationSeconds: 5.0,
+    );
+
+    await controller.setSelectedClipGain(0.35);
+    await controller.setSelectedClipMuted(true);
+
+    final nodes = await controller.audioNodesAt(1.0);
+    expect(nodes, hasLength(1));
+    expect(nodes.first.gain, closeTo(0.35, 0.001));
+    expect(nodes.first.isMuted, isTrue);
+
+    await controller.shutdown();
+    controller.dispose();
+  });
 }

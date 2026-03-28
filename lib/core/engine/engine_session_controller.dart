@@ -56,6 +56,9 @@ class FusionVideoEngineSessionController extends ChangeNotifier {
     return math.max(_config.durationSeconds, longestTrack);
   }
 
+  int get projectWidth => _config.width;
+  int get projectHeight => _config.height;
+
   List<TimelineTrackData> get tracks => List.unmodifiable(_tracks);
   String? get selectedClipId => _selectedClipId;
   Map<String, EngineAssetDescriptor> get assetRegistry =>
@@ -109,6 +112,80 @@ class FusionVideoEngineSessionController extends ChangeNotifier {
 
   EngineAssetDescriptor? activeVisualAssetAt(double seconds) {
     return activeVisualBindingAt(seconds)?.asset;
+  }
+
+  Future<List<EngineCompositionNodeSnapshot>> compositionAt(
+    double seconds,
+  ) async {
+    final handle = _projectHandle;
+    if (handle == null) {
+      return const <EngineCompositionNodeSnapshot>[];
+    }
+
+    final clamped = seconds.clamp(0.0, durationSeconds);
+    return _bridge.fetchCompositionNodes(
+      handle,
+      EngineTimelinePosition(
+        seconds: clamped,
+        frame: (clamped * _config.fps).round(),
+      ),
+    );
+  }
+
+  Future<EngineCompositionNodeSnapshot?> activeCompositionNodeAt(
+    double seconds,
+  ) async {
+    final nodes = await compositionAt(seconds);
+    if (nodes.isEmpty) {
+      return null;
+    }
+    return nodes.last;
+  }
+
+  Future<EngineCompositionNodeSnapshot?> compositionNodeForClipId(
+    String clipId, {
+    double? projectSeconds,
+  }) async {
+    final location = _findClip(clipId);
+    if (location == null) {
+      return null;
+    }
+
+    final targetSeconds = (projectSeconds ?? currentSeconds).clamp(
+      location.start,
+      location.end,
+    );
+    final nodes = await compositionAt(targetSeconds);
+    for (final node in nodes) {
+      if (node.clipId == clipId) {
+        return node;
+      }
+    }
+    return null;
+  }
+
+  Future<List<EngineAudioNodeSnapshot>> audioNodesAt(double seconds) async {
+    final handle = _projectHandle;
+    if (handle == null) {
+      return const <EngineAudioNodeSnapshot>[];
+    }
+
+    final clamped = seconds.clamp(0.0, durationSeconds);
+    return _bridge.fetchAudioNodes(
+      handle,
+      EngineTimelinePosition(
+        seconds: clamped,
+        frame: (clamped * _config.fps).round(),
+      ),
+    );
+  }
+
+  Future<EngineAudioNodeSnapshot?> activeAudioNodeAt(double seconds) async {
+    final nodes = await audioNodesAt(seconds);
+    if (nodes.isEmpty) {
+      return null;
+    }
+    return nodes.last;
   }
 
   EngineVisualBinding? activeVisualBindingAt(double seconds) {
@@ -417,6 +494,38 @@ class FusionVideoEngineSessionController extends ChangeNotifier {
     _tracks = await _loadTracksFromEngine(handle);
     _selectedClipId =
         _findNewestClipIdByPrefix('${selectedClipId}_copy_') ?? duplicateId;
+    notifyListeners();
+  }
+
+  Future<void> setSelectedClipGain(double gain) async {
+    final selectedClipId = _selectedClipId;
+    final handle = _projectHandle;
+    if (selectedClipId == null || handle == null) {
+      return;
+    }
+
+    final result = _findClip(selectedClipId);
+    if (result == null || result.clip.type != TimelineClipType.media) {
+      return;
+    }
+
+    await _bridge.setClipGain(handle, selectedClipId, gain.clamp(0.0, 1.0));
+    notifyListeners();
+  }
+
+  Future<void> setSelectedClipMuted(bool muted) async {
+    final selectedClipId = _selectedClipId;
+    final handle = _projectHandle;
+    if (selectedClipId == null || handle == null) {
+      return;
+    }
+
+    final result = _findClip(selectedClipId);
+    if (result == null || result.clip.type != TimelineClipType.media) {
+      return;
+    }
+
+    await _bridge.setClipMuted(handle, selectedClipId, muted);
     notifyListeners();
   }
 

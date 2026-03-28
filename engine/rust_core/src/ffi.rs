@@ -290,10 +290,59 @@ pub extern "C" fn fusion_video_engine_duplicate_clip(
 }
 
 #[no_mangle]
+pub extern "C" fn fusion_video_engine_set_clip_gain(
+    handle: i64,
+    clip_id: *const std::os::raw::c_char,
+    gain: f64,
+) -> u8 {
+    if clip_id.is_null() {
+        return 0;
+    }
+
+    let Ok(clip_id) = unsafe { CStr::from_ptr(clip_id) }.to_str() else {
+        return 0;
+    };
+
+    with_runtime(handle, |runtime| {
+        if runtime.project.set_clip_gain(clip_id, gain) {
+            1
+        } else {
+            0
+        }
+    })
+    .unwrap_or(0)
+}
+
+#[no_mangle]
+pub extern "C" fn fusion_video_engine_set_clip_muted(
+    handle: i64,
+    clip_id: *const std::os::raw::c_char,
+    is_muted: u8,
+) -> u8 {
+    if clip_id.is_null() {
+        return 0;
+    }
+
+    let Ok(clip_id) = unsafe { CStr::from_ptr(clip_id) }.to_str() else {
+        return 0;
+    };
+
+    with_runtime(handle, |runtime| {
+        if runtime.project.set_clip_muted(clip_id, is_muted != 0) {
+            1
+        } else {
+            0
+        }
+    })
+    .unwrap_or(0)
+}
+
+#[no_mangle]
 pub extern "C" fn fusion_video_engine_import_asset(
     handle: i64,
     asset_id: *const std::os::raw::c_char,
     uri: *const std::os::raw::c_char,
+    label: *const std::os::raw::c_char,
     track_kind: u8,
     duration_seconds: f64,
     width: i32,
@@ -313,12 +362,21 @@ pub extern "C" fn fusion_video_engine_import_asset(
     let Ok(uri) = unsafe { CStr::from_ptr(uri) }.to_str() else {
         return 0;
     };
+    let label = if label.is_null() {
+        None
+    } else {
+        unsafe { CStr::from_ptr(label) }
+            .to_str()
+            .ok()
+            .map(|value| value.to_string())
+    };
 
     with_runtime(handle, |runtime| {
         runtime.project.import_asset(AssetState {
             id: asset_id.to_string(),
             uri: uri.to_string(),
             kind,
+            label,
             duration_seconds: if duration_seconds > 0.0 {
                 Some(duration_seconds)
             } else {
@@ -377,6 +435,44 @@ pub extern "C" fn fusion_video_engine_insert_clip(
 pub extern "C" fn fusion_video_engine_get_timeline_json(handle: i64) -> *mut std::os::raw::c_char {
     let Some(json) = with_runtime(handle, |runtime| {
         serde_json::to_string(&runtime.project.tracks).ok()
+    })
+    .flatten() else {
+        return std::ptr::null_mut();
+    };
+
+    match CString::new(json) {
+        Ok(value) => value.into_raw(),
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn fusion_video_engine_get_composition_json(
+    handle: i64,
+    seconds: f64,
+    _frame: i64,
+) -> *mut std::os::raw::c_char {
+    let Some(json) = with_runtime(handle, |runtime| {
+        serde_json::to_string(&runtime.project.composition_nodes_at(seconds)).ok()
+    })
+    .flatten() else {
+        return std::ptr::null_mut();
+    };
+
+    match CString::new(json) {
+        Ok(value) => value.into_raw(),
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn fusion_video_engine_get_audio_json(
+    handle: i64,
+    seconds: f64,
+    _frame: i64,
+) -> *mut std::os::raw::c_char {
+    let Some(json) = with_runtime(handle, |runtime| {
+        serde_json::to_string(&runtime.project.audio_nodes_at(seconds)).ok()
     })
     .flatten() else {
         return std::ptr::null_mut();

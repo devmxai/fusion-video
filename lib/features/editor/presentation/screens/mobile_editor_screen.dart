@@ -6,6 +6,9 @@ import 'package:image_picker/image_picker.dart';
 
 import '../../../../core/engine/engine_contract.dart';
 import '../../../../core/engine/engine_session_controller.dart';
+import '../../../../core/export/export_backend.dart';
+import '../../../../core/export/export_session_controller.dart';
+import '../../../../core/export/native_export_backend.dart';
 import '../../../../core/media/local_media_probe.dart';
 import '../../../../core/preview/native_preview_backend.dart';
 import '../../../../core/preview/preview_backend.dart';
@@ -35,11 +38,13 @@ class _MobileEditorScreenState extends State<MobileEditorScreen> {
   late final FusionVideoEngineSessionController _engineController;
   late final ValueNotifier<List<MockAssetItem>> _assetLibrary;
   late final FusionPreviewBackend _previewBackend;
+  late final FusionExportSessionController _exportController;
+  List<EngineCompositionNodeSnapshot> _compositionNodes =
+      const <EngineCompositionNodeSnapshot>[];
+  List<EngineAudioNodeSnapshot> _audioNodes = const <EngineAudioNodeSnapshot>[];
   String? _previewAssetId;
   Size? _workspaceSize;
-  bool _isSyncingPreviewFromTimeline = false;
   bool _isTimelineScrubbing = false;
-  DateTime? _lastPreviewSyncAt;
   Timer? _previewSeekDebounce;
   double? _pendingPreviewSeekSeconds;
   bool _previewSeekInFlight = false;
@@ -60,9 +65,14 @@ class _MobileEditorScreenState extends State<MobileEditorScreen> {
       const <MockAssetItem>[],
     );
     _previewBackend = NativePreviewBackend(projectId: 1);
+    _exportController = FusionExportSessionController(
+      backend: NativeExportBackend(),
+    );
     _engineController.addListener(_handleEngineChanged);
     _previewBackend.addListener(_handlePreviewBackendChanged);
+    _exportController.addListener(_handleExportChanged);
     unawaited(_engineController.initialize());
+    unawaited(_exportController.initialize());
   }
 
   MockAssetItem? _findAssetById(String id) {
@@ -89,7 +99,7 @@ class _MobileEditorScreenState extends State<MobileEditorScreen> {
         EngineTrackKind.lipSync => EditorMediaTab.lipSync,
         EngineTrackKind.effect => EditorMediaTab.video,
       },
-      label: descriptor.uri.split('/').last,
+      label: descriptor.label ?? descriptor.uri.split('/').last,
       tone: 80,
       localPath: descriptor.uri,
       isImported: true,
@@ -99,27 +109,62 @@ class _MobileEditorScreenState extends State<MobileEditorScreen> {
     );
   }
 
-  Future<EngineVisualBinding?> _currentPreviewBinding({
+  EngineCompositionNodeSnapshot? _resolveBasePreviewNode(
+    List<EngineCompositionNodeSnapshot> nodes, {
+    String? selectedClipId,
+  }) {
+    if (nodes.isEmpty) {
+      return null;
+    }
+
+    if (selectedClipId != null && !_engineController.isPlaying) {
+      for (final node in nodes.reversed) {
+        if (node.clipId == selectedClipId &&
+            (node.trackKind == EngineTrackKind.video ||
+                node.trackKind == EngineTrackKind.image)) {
+          return node;
+        }
+      }
+    }
+
+    for (final node in nodes) {
+      if (node.trackKind == EngineTrackKind.video ||
+          node.trackKind == EngineTrackKind.image) {
+        return node;
+      }
+    }
+    return null;
+  }
+
+  Future<EngineCompositionNodeSnapshot?> _currentPreviewNode({
     double? projectSeconds,
   }) async {
-    EngineVisualBinding? targetBinding;
-    final selectedClipId = _engineController.selectedClipId;
     final seconds = projectSeconds ?? _engineController.currentSeconds;
-    if (selectedClipId != null && !_engineController.isPlaying) {
-      targetBinding = _engineController.visualBindingForClipId(
-        selectedClipId,
-        projectSeconds: seconds,
-      );
-    }
-    targetBinding ??= _engineController.activeVisualBindingAt(seconds);
-    return targetBinding;
+    final nodes = await _engineController.compositionAt(seconds);
+    _compositionNodes = nodes;
+    return _resolveBasePreviewNode(
+      nodes,
+      selectedClipId: _engineController.selectedClipId,
+    );
   }
 
   Future<void> _syncPreviewFromEngineState() async {
-    final targetBinding = await _currentPreviewBinding();
+    final targetNode = await _currentPreviewNode();
+    _audioNodes = await _engineController.audioNodesAt(
+      _engineController.currentSeconds,
+    );
+    await _previewBackend.updateCompositionScene(
+      projectWidth: _engineController.projectWidth,
+      projectHeight: _engineController.projectHeight,
+      nodes: _previewCompositionNodesFromScene(_compositionNodes),
+      audioNodes: _previewAudioNodesFromScene(_audioNodes),
+      baseClipId: targetNode?.clipId,
+      selectedClipId: _engineController.selectedClipId,
+    );
 
     final currentSource = _previewBackend.state.source;
-    if (targetBinding == null) {
+    if (targetNode == null) {
+      _compositionNodes = const <EngineCompositionNodeSnapshot>[];
       _previewAssetId = null;
       if (currentSource != null) {
         await _previewBackend.attachSource(null);
@@ -127,28 +172,38 @@ class _MobileEditorScreenState extends State<MobileEditorScreen> {
       return;
     }
 
-    final targetAsset = _assetFromDescriptor(targetBinding.asset);
+    final targetDescriptor = _engineController.assetForId(targetNode.assetId) ??
+        EngineAssetDescriptor(
+          id: targetNode.assetId,
+          uri: targetNode.assetUri,
+          kind: targetNode.trackKind,
+          label: targetNode.displayLabel,
+        );
+    final targetAsset = _assetFromDescriptor(targetDescriptor);
     if (targetAsset == null || !targetAsset.isVisual) {
       return;
     }
 
-    final targetSource = _previewSourceForBinding(targetBinding);
-    if (_shouldAttachPreviewSource(currentSource, targetSource)) {
+    final targetSource = _previewSourceForNode(targetNode);
+    final didAttachSource =
+        _shouldAttachPreviewSource(currentSource, targetSource);
+    if (didAttachSource) {
       await _activatePreviewForAsset(
         targetAsset,
         previewSource: targetSource,
       );
     } else {
-      _previewAssetId = targetAsset.id;
+      _previewAssetId = targetNode.assetId;
     }
 
     final previewState = _previewBackend.state;
-    final localPositionSeconds = targetBinding.sourcePositionSeconds;
-    final delta = (localPositionSeconds - previewState.positionSeconds).abs();
-    final shouldForce = !_engineController.isPlaying && !_isTimelineScrubbing;
-    if (_engineController.isPlaying != previewState.isPlaying ||
-        delta > (_engineController.isPlaying ? 0.14 : 0.02) ||
-        shouldForce) {
+    final localPositionSeconds = targetNode.sourcePositionSeconds;
+    final shouldForce = didAttachSource ||
+        (!_engineController.isPlaying && !_isTimelineScrubbing);
+    final shouldSyncTransport = didAttachSource ||
+        _engineController.isPlaying != previewState.isPlaying ||
+        !_engineController.isPlaying;
+    if (shouldSyncTransport) {
       await _previewBackend.syncTransport(
         positionSeconds: localPositionSeconds,
         isPlaying: _engineController.isPlaying,
@@ -161,10 +216,12 @@ class _MobileEditorScreenState extends State<MobileEditorScreen> {
   void dispose() {
     _engineController.removeListener(_handleEngineChanged);
     _previewBackend.removeListener(_handlePreviewBackendChanged);
+    _exportController.removeListener(_handleExportChanged);
     unawaited(_engineController.shutdown());
     _previewSeekDebounce?.cancel();
     unawaited(_previewBackend.disposeBackend());
     _engineController.dispose();
+    _exportController.dispose();
     _assetLibrary.dispose();
     super.dispose();
   }
@@ -174,7 +231,9 @@ class _MobileEditorScreenState extends State<MobileEditorScreen> {
     if (handle != null) {
       unawaited(_previewBackend.bindProject(handle.id));
     }
-    unawaited(_syncPreviewFromEngineState());
+    if (_shouldRefreshPreviewScene()) {
+      unawaited(_syncPreviewFromEngineState());
+    }
     if (!mounted) {
       return;
     }
@@ -182,17 +241,122 @@ class _MobileEditorScreenState extends State<MobileEditorScreen> {
     setState(() {});
   }
 
+  bool _shouldRefreshPreviewScene() {
+    if (!_engineController.isPlaying) {
+      return true;
+    }
+    if (_previewBackend.state.isPlaying != _engineController.isPlaying) {
+      return true;
+    }
+    if (_previewBackend.state.selectedClipId !=
+        _engineController.selectedClipId) {
+      return true;
+    }
+    return !_cachedSceneCoversSecond(_engineController.currentSeconds);
+  }
+
+  bool _cachedSceneCoversSecond(double seconds) {
+    if (_compositionNodes.isEmpty) {
+      return false;
+    }
+    for (final node in _compositionNodes) {
+      if (seconds < node.clipStartSeconds ||
+          seconds > node.clipEndSeconds + 0.0001) {
+        return false;
+      }
+    }
+    for (final node in _audioNodes) {
+      if (seconds < node.clipStartSeconds ||
+          seconds > node.clipEndSeconds + 0.0001) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  void _handleExportChanged() {
+    if (!mounted) {
+      return;
+    }
+
+    final status = _exportController.status;
+    if (status.kind == FusionExportStatusKind.completed &&
+        status.outputPath != null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Exported to ${status.outputPath}')),
+      );
+      _exportController.reset();
+      return;
+    }
+
+    if (status.kind == FusionExportStatusKind.failed &&
+        status.errorMessage != null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Export failed: ${status.errorMessage}')),
+      );
+      _exportController.reset();
+      return;
+    }
+
+    setState(() {});
+  }
+
+  Future<void> _handleExportPressed() async {
+    final projectId = _engineController.projectHandle?.id;
+    final source = _previewBackend.state.source;
+    if (projectId == null || source == null) {
+      return;
+    }
+    if (source.kind != PreviewSourceKind.video) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+            content:
+                Text('Export foundation currently supports video clips only.')),
+      );
+      return;
+    }
+
+    final matchingAudioNode =
+        _audioNodes.where((node) => node.clipId == source.id);
+    final audioNode =
+        matchingAudioNode.isNotEmpty ? matchingAudioNode.first : null;
+    final exportSceneNodes =
+        _exportSceneNodesFromCompositionNodes(_compositionNodes);
+    final exportAudioNodes = _exportAudioNodesFromAudioNodes(_audioNodes);
+
+    await _exportController.startExport(
+      FusionExportRequest(
+        projectId: projectId,
+        clipId: source.id,
+        sourcePath: source.localPath,
+        sourceKind: FusionExportSourceKind.video,
+        sourceStartSeconds: source.sourceStartSeconds,
+        sourceEndSeconds: source.sourceEndSeconds,
+        projectWidth: _engineController.projectWidth,
+        projectHeight: _engineController.projectHeight,
+        clipStartSeconds: source.clipStartSeconds,
+        clipEndSeconds: source.clipEndSeconds,
+        audioGain: audioNode?.gain ?? 1.0,
+        isMuted: audioNode?.isMuted ?? false,
+        sceneNodes: exportSceneNodes,
+        audioNodes: exportAudioNodes,
+        outputFileName:
+            'fusion_export_${DateTime.now().millisecondsSinceEpoch}.mp4',
+      ),
+    );
+  }
+
   void _setCurrentSeconds(double value) {
     unawaited(_engineController.seekSeconds(value));
     final previewState = _previewBackend.state;
     if (previewState.isReady && !previewState.isPlaying) {
       unawaited(() async {
-        final binding = await _currentPreviewBinding(projectSeconds: value);
-        if (binding == null) {
+        final node = await _currentPreviewNode(projectSeconds: value);
+        if (node == null) {
           return;
         }
         _schedulePreviewSeek(
-          binding.sourcePositionSeconds,
+          node.sourcePositionSeconds,
           immediate: !_isTimelineScrubbing,
         );
       }());
@@ -223,7 +387,6 @@ class _MobileEditorScreenState extends State<MobileEditorScreen> {
     }
     _pendingPreviewSeekSeconds = null;
     _previewSeekInFlight = true;
-    _isSyncingPreviewFromTimeline = true;
     unawaited(
       _previewBackend
           .syncTransport(
@@ -233,7 +396,6 @@ class _MobileEditorScreenState extends State<MobileEditorScreen> {
       )
           .whenComplete(() {
         _previewSeekInFlight = false;
-        _isSyncingPreviewFromTimeline = false;
         if (_pendingPreviewSeekSeconds != null) {
           _previewSeekDebounce =
               Timer(const Duration(milliseconds: 16), _flushPreviewSeek);
@@ -290,9 +452,9 @@ class _MobileEditorScreenState extends State<MobileEditorScreen> {
   Future<void> _togglePlayback() async {
     final previewState = _previewBackend.state;
     if (previewState.isReady) {
-      final binding = await _currentPreviewBinding();
+      final node = await _currentPreviewNode();
       final localSeconds =
-          binding?.sourcePositionSeconds ?? previewState.positionSeconds;
+          node?.sourcePositionSeconds ?? previewState.positionSeconds;
       if (previewState.isPlaying) {
         await _engineController.pause();
         await _previewBackend.syncTransport(
@@ -328,22 +490,44 @@ class _MobileEditorScreenState extends State<MobileEditorScreen> {
 
   void _handleClipSelected(String clipId) {
     _engineController.selectClip(clipId);
-    final binding = _engineController.visualBindingForClipId(
-      clipId,
-      projectSeconds: _engineController.currentSeconds,
-    );
-    final asset = binding == null
-        ? _findAssetById(clipId)
-        : _assetFromDescriptor(binding.asset);
-    if (asset != null && asset.isVisual) {
-      unawaited(
-        _activatePreviewForAsset(
-          asset,
-          previewSource:
-              binding == null ? null : _previewSourceForBinding(binding),
-        ),
+    unawaited(() async {
+      final nodes = await _engineController.compositionAt(
+        _engineController.currentSeconds,
       );
-    }
+      _compositionNodes = nodes;
+      EngineCompositionNodeSnapshot? node;
+      for (final candidate in nodes) {
+        if (candidate.clipId == clipId) {
+          node = candidate;
+        }
+      }
+      final asset = node == null
+          ? (() {
+              final descriptor = _engineController.assetForClipId(clipId);
+              if (descriptor == null) {
+                return _findAssetById(clipId);
+              }
+              return _assetFromDescriptor(descriptor);
+            })()
+          : _assetFromDescriptor(
+              _engineController.assetForId(node.assetId) ??
+                  EngineAssetDescriptor(
+                    id: node.assetId,
+                    uri: node.assetUri,
+                    kind: node.trackKind,
+                    label: node.displayLabel,
+                  ),
+            );
+      if (asset != null && asset.isVisual) {
+        await _activatePreviewForAsset(
+          asset,
+          previewSource: node == null ? null : _previewSourceForNode(node),
+        );
+      }
+      if (mounted) {
+        setState(() {});
+      }
+    }());
   }
 
   void _handlePreviewBackendChanged() {
@@ -358,27 +542,7 @@ class _MobileEditorScreenState extends State<MobileEditorScreen> {
       _workspaceSize = previewState.contentSize;
     }
 
-    if (!previewState.isPlaying &&
-        _engineController.isPlaying &&
-        previewState.durationSeconds > 0 &&
-        previewState.positionSeconds >= previewState.durationSeconds - 0.04) {
-      unawaited(_engineController.pause());
-    }
-
     setState(() {});
-
-    if (_isSyncingPreviewFromTimeline) {
-      return;
-    }
-
-    final now = DateTime.now();
-    if (_lastPreviewSyncAt != null &&
-        now.difference(_lastPreviewSyncAt!) <
-            const Duration(milliseconds: 80)) {
-      return;
-    }
-    _lastPreviewSyncAt = now;
-    unawaited(_engineController.seekSeconds(previewState.positionSeconds));
   }
 
   void _handleTimelineScrubStateChanged(bool isActive) {
@@ -408,7 +572,7 @@ class _MobileEditorScreenState extends State<MobileEditorScreen> {
             asset.width == null ||
             asset.height == null)) {
       try {
-        final metadata = await _readVideoMetadata(asset.localPath!);
+        final metadata = await _readVideoMetadataWithRetry(asset.localPath!);
         final updatedAsset = asset.copyWith(
           durationSeconds: metadata.durationSeconds,
           width: metadata.width,
@@ -488,6 +652,8 @@ class _MobileEditorScreenState extends State<MobileEditorScreen> {
           ? PreviewSourceKind.video
           : PreviewSourceKind.image,
       localPath: asset.localPath!,
+      clipStartSeconds: 0,
+      clipEndSeconds: asset.durationSeconds,
       durationSeconds: asset.durationSeconds,
       width: asset.width,
       height: asset.height,
@@ -497,21 +663,168 @@ class _MobileEditorScreenState extends State<MobileEditorScreen> {
     );
   }
 
-  PreviewSource _previewSourceForBinding(EngineVisualBinding binding) {
+  PreviewSource _previewSourceForNode(EngineCompositionNodeSnapshot node) {
+    final descriptor = _engineController.assetForId(node.assetId);
     return PreviewSource(
-      id: binding.clipId,
-      assetId: binding.asset.id,
-      kind: binding.asset.kind == EngineTrackKind.video
+      id: node.clipId,
+      assetId: node.assetId,
+      kind: node.trackKind == EngineTrackKind.video
           ? PreviewSourceKind.video
           : PreviewSourceKind.image,
-      localPath: binding.asset.uri,
-      durationSeconds: binding.asset.durationSeconds,
-      width: binding.asset.width,
-      height: binding.asset.height,
-      sourceStartSeconds: binding.sourceStartSeconds,
-      sourceEndSeconds: binding.sourceEndSeconds,
-      clipDurationSeconds: binding.clipDurationSeconds,
+      localPath: node.assetUri,
+      clipStartSeconds: node.clipStartSeconds,
+      clipEndSeconds: node.clipEndSeconds,
+      durationSeconds: descriptor?.durationSeconds,
+      width: descriptor?.width,
+      height: descriptor?.height,
+      sourceStartSeconds: node.sourceStartSeconds,
+      sourceEndSeconds: node.sourceEndSeconds,
+      clipDurationSeconds: node.clipDurationSeconds,
     );
+  }
+
+  List<PreviewCompositionNode> _previewCompositionNodesFromScene(
+    List<EngineCompositionNodeSnapshot> nodes,
+  ) {
+    final previewNodes = <PreviewCompositionNode>[];
+    for (final node in nodes) {
+      if (node.trackKind == EngineTrackKind.audio ||
+          node.trackKind == EngineTrackKind.effect) {
+        continue;
+      }
+      previewNodes.add(
+        PreviewCompositionNode(
+          clipId: node.clipId,
+          assetId: node.assetId,
+          kind: switch (node.trackKind) {
+            EngineTrackKind.video => 'video',
+            EngineTrackKind.image => 'image',
+            EngineTrackKind.text => 'text',
+            EngineTrackKind.lipSync => 'lipSync',
+            EngineTrackKind.audio => 'audio',
+            EngineTrackKind.effect => 'effect',
+          },
+          localPath: node.assetUri,
+          displayLabel: node.displayLabel ??
+              _findAssetById(node.assetId)?.label ??
+              switch (node.trackKind) {
+                EngineTrackKind.video => 'Video',
+                EngineTrackKind.image => 'Image',
+                EngineTrackKind.audio => 'Audio',
+                EngineTrackKind.text => 'Text',
+                EngineTrackKind.lipSync => 'Lip Sync',
+                EngineTrackKind.effect => 'Effect',
+              },
+          clipStartSeconds: node.clipStartSeconds,
+          clipEndSeconds: node.clipEndSeconds,
+          sourcePositionSeconds: node.sourcePositionSeconds,
+          sourceStartSeconds: node.sourceStartSeconds,
+          sourceEndSeconds: node.sourceEndSeconds,
+          x: node.transform.x,
+          y: node.transform.y,
+          width: node.transform.width,
+          height: node.transform.height,
+          opacity: node.transform.opacity,
+          rotationDegrees: node.transform.rotationDegrees,
+          zIndex: node.transform.zIndex,
+        ),
+      );
+    }
+    previewNodes.sort((a, b) => a.zIndex.compareTo(b.zIndex));
+    return previewNodes;
+  }
+
+  List<PreviewAudioNode> _previewAudioNodesFromScene(
+    List<EngineAudioNodeSnapshot> nodes,
+  ) {
+    return nodes
+        .map(
+          (node) => PreviewAudioNode(
+            clipId: node.clipId,
+            assetId: node.assetId,
+            kind: switch (node.trackKind) {
+              EngineTrackKind.video => 'video',
+              EngineTrackKind.audio => 'audio',
+              EngineTrackKind.image => 'image',
+              EngineTrackKind.text => 'text',
+              EngineTrackKind.lipSync => 'lipSync',
+              EngineTrackKind.effect => 'effect',
+            },
+            localPath: node.assetUri,
+            displayLabel: node.displayLabel,
+            clipStartSeconds: node.clipStartSeconds,
+            clipEndSeconds: node.clipEndSeconds,
+            sourcePositionSeconds: node.sourcePositionSeconds,
+            sourceStartSeconds: node.sourceStartSeconds,
+            sourceEndSeconds: node.sourceEndSeconds,
+            gain: node.gain,
+            isMuted: node.isMuted,
+          ),
+        )
+        .toList(growable: false);
+  }
+
+  List<FusionExportSceneNode> _exportSceneNodesFromCompositionNodes(
+    List<EngineCompositionNodeSnapshot> nodes,
+  ) {
+    return nodes
+        .map(
+          (node) => FusionExportSceneNode(
+            clipId: node.clipId,
+            assetId: node.assetId,
+            kind: switch (node.trackKind) {
+              EngineTrackKind.video => 'video',
+              EngineTrackKind.image => 'image',
+              EngineTrackKind.audio => 'audio',
+              EngineTrackKind.text => 'text',
+              EngineTrackKind.lipSync => 'lipSync',
+              EngineTrackKind.effect => 'effect',
+            },
+            localPath: node.assetUri,
+            displayLabel: node.displayLabel,
+            clipStartSeconds: node.clipStartSeconds,
+            clipEndSeconds: node.clipEndSeconds,
+            sourceStartSeconds: node.sourceStartSeconds,
+            sourceEndSeconds: node.sourceEndSeconds,
+            x: node.transform.x,
+            y: node.transform.y,
+            width: node.transform.width,
+            height: node.transform.height,
+            opacity: node.transform.opacity,
+            rotationDegrees: node.transform.rotationDegrees,
+            zIndex: node.transform.zIndex,
+          ),
+        )
+        .toList(growable: false);
+  }
+
+  List<FusionExportAudioNode> _exportAudioNodesFromAudioNodes(
+    List<EngineAudioNodeSnapshot> nodes,
+  ) {
+    return nodes
+        .map(
+          (node) => FusionExportAudioNode(
+            clipId: node.clipId,
+            assetId: node.assetId,
+            kind: switch (node.trackKind) {
+              EngineTrackKind.video => 'video',
+              EngineTrackKind.image => 'image',
+              EngineTrackKind.audio => 'audio',
+              EngineTrackKind.text => 'text',
+              EngineTrackKind.lipSync => 'lipSync',
+              EngineTrackKind.effect => 'effect',
+            },
+            localPath: node.assetUri,
+            displayLabel: node.displayLabel,
+            clipStartSeconds: node.clipStartSeconds,
+            clipEndSeconds: node.clipEndSeconds,
+            sourceStartSeconds: node.sourceStartSeconds,
+            sourceEndSeconds: node.sourceEndSeconds,
+            gain: node.gain,
+            isMuted: node.isMuted,
+          ),
+        )
+        .toList(growable: false);
   }
 
   bool _shouldAttachPreviewSource(
@@ -556,8 +869,7 @@ class _MobileEditorScreenState extends State<MobileEditorScreen> {
   Future<void> _importAssetForTab(EditorMediaTab tab) async {
     try {
       if (tab == EditorMediaTab.text || tab == EditorMediaTab.lipSync) {
-        final label =
-            tab == EditorMediaTab.text ? 'Text Layer' : 'Lip Sync Layer';
+        final label = tab == EditorMediaTab.text ? 'New Text' : 'Lip Sync';
         final newAsset = MockAssetItem(
           id: '${tab.name}_${DateTime.now().microsecondsSinceEpoch}',
           tab: tab,
@@ -588,6 +900,7 @@ class _MobileEditorScreenState extends State<MobileEditorScreen> {
         tone: 40 + (_assetLibrary.value.length * 37) % 300,
         localPath: importedFile.path,
         isImported: true,
+        durationSeconds: importedFile.durationSeconds,
         width: importedFile.width,
         height: importedFile.height,
       );
@@ -600,6 +913,8 @@ class _MobileEditorScreenState extends State<MobileEditorScreen> {
             id: newAsset.id,
             uri: newAsset.localPath ?? '',
             kind: _engineTrackKindFor(newAsset.tab),
+            label: newAsset.label,
+            durationSeconds: newAsset.durationSeconds,
             width: newAsset.width,
             height: newAsset.height,
           ),
@@ -639,9 +954,13 @@ class _MobileEditorScreenState extends State<MobileEditorScreen> {
         if (file == null) {
           return null;
         }
+        final metadata = await _readVideoMetadataWithRetry(file.path);
         return _ImportedAssetFile(
           path: file.path,
           name: file.name,
+          durationSeconds: metadata.durationSeconds,
+          width: metadata.width,
+          height: metadata.height,
         );
       case EditorMediaTab.image:
         final file = await _imagePicker.pickImage(
@@ -689,11 +1008,20 @@ class _MobileEditorScreenState extends State<MobileEditorScreen> {
 
     try {
       final preparedAsset = await _ensureAssetMetadata(asset);
+      if (preparedAsset.tab == EditorMediaTab.video &&
+          ((preparedAsset.durationSeconds ?? 0) <= 0 ||
+              preparedAsset.width == null ||
+              preparedAsset.height == null)) {
+        throw StateError(
+          'Unable to read complete video metadata before adding it to the timeline.',
+        );
+      }
       await _engineController.importAsset(
         EngineAssetDescriptor(
           id: preparedAsset.id,
           uri: preparedAsset.localPath ?? '',
           kind: _engineTrackKindFor(preparedAsset.tab),
+          label: preparedAsset.label,
           durationSeconds: preparedAsset.durationSeconds,
           width: preparedAsset.width,
           height: preparedAsset.height,
@@ -808,6 +1136,21 @@ class _MobileEditorScreenState extends State<MobileEditorScreen> {
     );
   }
 
+  Future<_ImportedAssetMetadata> _readVideoMetadataWithRetry(
+      String path) async {
+    var last = const _ImportedAssetMetadata();
+    for (var attempt = 0; attempt < 4; attempt++) {
+      last = await _readVideoMetadata(path);
+      if ((last.durationSeconds ?? 0) > 0 &&
+          (last.width ?? 0) > 0 &&
+          (last.height ?? 0) > 0) {
+        return last;
+      }
+      await Future<void>.delayed(Duration(milliseconds: 120 * (attempt + 1)));
+    }
+    return last;
+  }
+
   Future<_ImportedAssetMetadata> _readImageMetadata(String path) async {
     final metadata = await probeImageMetadata(path);
     return _ImportedAssetMetadata(
@@ -832,7 +1175,11 @@ class _MobileEditorScreenState extends State<MobileEditorScreen> {
               color: FxPalette.background,
               child: Column(
                 children: [
-                  const EditorTopBar(),
+                  EditorTopBar(
+                    onShare: _handleExportPressed,
+                    isExporting: _exportController.isExporting,
+                    exportProgress: _exportController.status.progress,
+                  ),
                   Expanded(
                     flex: 4,
                     child: ConstrainedBox(
@@ -931,12 +1278,14 @@ class _ImportedAssetFile {
   const _ImportedAssetFile({
     required this.path,
     required this.name,
+    this.durationSeconds,
     this.width,
     this.height,
   });
 
   final String path;
   final String name;
+  final double? durationSeconds;
   final int? width;
   final int? height;
 }

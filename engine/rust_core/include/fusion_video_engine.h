@@ -51,10 +51,21 @@ uint8_t fusion_video_engine_duplicate_clip(
     int64_t handle,
     const char* clip_id
 );
+uint8_t fusion_video_engine_set_clip_gain(
+    int64_t handle,
+    const char* clip_id,
+    double gain
+);
+uint8_t fusion_video_engine_set_clip_muted(
+    int64_t handle,
+    const char* clip_id,
+    uint8_t is_muted
+);
 uint8_t fusion_video_engine_import_asset(
     int64_t handle,
     const char* asset_id,
     const char* uri,
+    const char* label,
     uint8_t track_kind,
     double duration_seconds,
     int32_t width,
@@ -73,6 +84,16 @@ double fusion_video_engine_get_position_seconds(int64_t handle);
 int64_t fusion_video_engine_get_position_frame(int64_t handle);
 uint8_t fusion_video_engine_is_buffering(int64_t handle);
 char* fusion_video_engine_get_timeline_json(int64_t handle);
+char* fusion_video_engine_get_composition_json(
+    int64_t handle,
+    double seconds,
+    int64_t frame
+);
+char* fusion_video_engine_get_audio_json(
+    int64_t handle,
+    double seconds,
+    int64_t frame
+);
 void fusion_video_engine_free_string(char* value);
 
 #ifdef __cplusplus

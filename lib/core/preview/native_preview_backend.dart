@@ -11,7 +11,6 @@ class NativePreviewBackend extends FusionPreviewBackend {
 
   int projectId;
   PreviewBackendState _state = const PreviewBackendState();
-  DateTime? _lastTransportPushAt;
 
   @override
   PreviewBackendState get state => _state;
@@ -36,25 +35,15 @@ class NativePreviewBackend extends FusionPreviewBackend {
       positionSeconds: targetSeconds,
       isPlaying: isPlaying,
     );
-    final now = DateTime.now();
-    final timeSinceLastPush = _lastTransportPushAt == null
-        ? const Duration(days: 1)
-        : now.difference(_lastTransportPushAt!);
     final shouldPush = force ||
         nextState.isPlaying != _state.isPlaying ||
-        (!_state.isPlaying &&
-            (nextState.positionSeconds - _state.positionSeconds).abs() >
-                0.001) ||
-        (nextState.isPlaying &&
-            ((nextState.positionSeconds - _state.positionSeconds).abs() >
-                    0.12 ||
-                timeSinceLastPush >= const Duration(milliseconds: 220)));
+        (!nextState.isPlaying &&
+            (nextState.positionSeconds - _state.positionSeconds).abs() > 0.001);
 
     _state = nextState;
     notifyListeners();
 
     if (shouldPush) {
-      _lastTransportPushAt = now;
       await _pushState();
     }
   }
@@ -64,17 +53,41 @@ class NativePreviewBackend extends FusionPreviewBackend {
     PreviewSource? source, {
     bool autoplay = false,
   }) async {
-    _state = PreviewBackendState(
+    _state = _state.copyWith(
       source: source,
+      clearSource: source == null,
       isReady: source != null,
-      isPlaying: autoplay,
+      isPlaying: source == null ? false : autoplay,
       durationSeconds: source?.effectiveDurationSeconds ?? 0,
       contentSize: (source?.width != null && source?.height != null)
           ? Size(source!.width!.toDouble(), source.height!.toDouble())
           : null,
+      clearContentSize: source == null,
     );
     notifyListeners();
-    _lastTransportPushAt = null;
+    await _pushState();
+  }
+
+  @override
+  Future<void> updateCompositionScene({
+    required int projectWidth,
+    required int projectHeight,
+    required List<PreviewCompositionNode> nodes,
+    required List<PreviewAudioNode> audioNodes,
+    String? baseClipId,
+    String? selectedClipId,
+  }) async {
+    _state = _state.copyWith(
+      compositionNodes: nodes,
+      audioNodes: audioNodes,
+      projectWidth: projectWidth,
+      projectHeight: projectHeight,
+      baseClipId: baseClipId,
+      clearBaseClipId: baseClipId == null,
+      selectedClipId: selectedClipId,
+      clearSelectedClipId: selectedClipId == null,
+    );
+    notifyListeners();
     await _pushState();
   }
 
@@ -121,8 +134,16 @@ class NativePreviewBackend extends FusionPreviewBackend {
         PreviewSourceKind.image => 'image',
         null => null,
       },
+      clipStartSeconds: _state.source?.clipStartSeconds,
+      clipEndSeconds: _state.source?.clipEndSeconds,
       sourceStartSeconds: _state.source?.sourceStartSeconds,
       sourceEndSeconds: _state.source?.sourceEndSeconds,
+      projectWidth: _state.projectWidth,
+      projectHeight: _state.projectHeight,
+      baseClipId: _state.baseClipId,
+      selectedClipId: _state.selectedClipId,
+      sceneNodes: _state.compositionNodes.map((node) => node.toMap()).toList(),
+      audioNodes: _state.audioNodes.map((node) => node.toMap()).toList(),
     );
   }
 

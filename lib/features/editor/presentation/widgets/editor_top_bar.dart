@@ -4,7 +4,16 @@ import '../../../../core/theme/app_theme.dart';
 import 'fx_icon_button.dart';
 
 class EditorTopBar extends StatelessWidget {
-  const EditorTopBar({super.key});
+  const EditorTopBar({
+    super.key,
+    this.onShare,
+    this.isExporting = false,
+    this.exportProgress = 0,
+  });
+
+  final VoidCallback? onShare;
+  final bool isExporting;
+  final double exportProgress;
 
   @override
   Widget build(BuildContext context) {
@@ -17,16 +26,45 @@ class EditorTopBar extends StatelessWidget {
           bottom: BorderSide(color: FxPalette.divider, width: 1),
         ),
       ),
-      child: const Row(
+      child: Row(
         children: [
-          FxIconButton(icon: Icons.history_rounded, size: 34, iconScale: 0.38),
-          SizedBox(width: 6),
-          FxIconButton(icon: Icons.undo_rounded, size: 34, iconScale: 0.38),
-          SizedBox(width: 6),
-          FxIconButton(icon: Icons.redo_rounded, size: 34, iconScale: 0.38),
-          Spacer(),
-          FxIconButton(
-              icon: Icons.ios_share_rounded, size: 34, iconScale: 0.38),
+          const FxIconButton(
+            icon: Icons.history_rounded,
+            size: 34,
+            iconScale: 0.38,
+          ),
+          const SizedBox(width: 6),
+          const FxIconButton(
+              icon: Icons.undo_rounded, size: 34, iconScale: 0.38),
+          const SizedBox(width: 6),
+          const FxIconButton(
+              icon: Icons.redo_rounded, size: 34, iconScale: 0.38),
+          const Spacer(),
+          Stack(
+            alignment: Alignment.center,
+            children: [
+              FxIconButton(
+                icon: Icons.ios_share_rounded,
+                size: 34,
+                iconScale: 0.38,
+                onPressed: isExporting ? null : onShare,
+              ),
+              if (isExporting)
+                SizedBox(
+                  width: 16,
+                  height: 16,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2,
+                    value: exportProgress <= 0 || exportProgress >= 1
+                        ? null
+                        : exportProgress,
+                    valueColor: const AlwaysStoppedAnimation<Color>(
+                      FxPalette.accent,
+                    ),
+                  ),
+                ),
+            ],
+          ),
         ],
       ),
     );

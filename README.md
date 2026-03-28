@@ -40,15 +40,19 @@ The project currently includes:
 - `Phase 1`: completed
   - `video_player` removed
   - native media-backed preview path in place
-- `Phase 2`: in active progress
-  - `Sprint 1`: asset registry inside the engine
-  - `Sprint 2`: timeline clips bound to real imported assets
-  - `Sprint 3`: clip source offsets wired into preview timing
-  - `Sprint 4`: clip-bounded preview playback and project duration synchronization
-- `Phase 3+`: not started yet
-  - compositor
+- `Phase 2`: completed in foundation form
+  - asset registry inside the engine
+  - timeline clips bound to real imported assets
+  - clip source offsets wired into preview timing
+  - clip-bounded preview playback and project duration synchronization
+- `Phase 3`: in active progress
+  - composition scene snapshots
+  - native multi-node preview on iOS
+  - audio scene foundation and clip gain/mute support
+  - export foundation for iOS
+- `Phase 4+`: not started yet
   - transitions
-  - export engine
+  - full export graph
   - performance pass
 
 ## What Has Been Built
@@ -136,7 +140,40 @@ The current native preview stack is:
   - `TextureView + MediaPlayer`
   - native media probing through `MediaMetadataRetriever`
 
-This is still a preview phase implementation, not yet the final compositor/render/export engine.
+This is still a preview/compositor-foundation implementation, not yet the final production compositor/render/export engine.
+
+### Compositor Foundation
+
+The engine now exposes scene-oriented data instead of a single flat media binding.
+
+This foundation already includes:
+
+- composition node snapshots from Rust
+- audio node snapshots from Rust
+- clip start/end bounds
+- source start/end offsets
+- transform / opacity / z-order data
+- native preview composition on iOS for:
+  - base video
+  - secondary video overlays
+  - image overlays
+  - text / lip sync native placeholder nodes
+
+### Export Foundation
+
+The project also now includes a first export foundation for iOS.
+
+This export layer can currently:
+
+- build an export request from the active engine scene
+- pass scene and audio snapshot data into native iOS export code
+- create an `AVMutableComposition`
+- export a first scene-aware video result with:
+  - base video
+  - audio controls
+  - static overlays for image / text / lip sync
+
+This is not yet the final full timeline export graph.
 
 ## Repository Structure
 
@@ -229,11 +266,10 @@ The project is advancing from UI-plus-engine-state into full native preview/rend
 The biggest remaining milestones are:
 
 - final transport synchronization between engine timeline and native preview
-- full asset hydration into engine state
+- stable real-time playback on device and simulator
 - real audio/video sync engine
-- multi-track compositing
-- transition graph
-- export pipeline
+- full multi-track compositing
+- full scene-driven export graph
 - performance tuning for mobile-class devices
 
 The next major architectural milestone is:
@@ -242,6 +278,29 @@ The next major architectural milestone is:
   - multi-layer video/image/audio/text rendering
   - GPU-backed composition
   - engine-owned visual output instead of single-source preview handoff
+
+## Known Open Issue
+
+The current top blocking issue is still unresolved on iOS preview playback.
+
+Current symptoms:
+
+- imported video can still stop around the `5s` mark even when the source is much longer
+- playback can stutter and feel unsmooth
+- audio can sound doubled, noisy, echo-like, or otherwise unclear
+
+Important clarification:
+
+- media import itself is real
+- timeline insertion is real
+- the unresolved bug is in the current transport / native preview / audio synchronization path
+
+This issue is now documented explicitly because the repository is being used as a checkpoint before a deeper multi-agent code review on:
+
+- engine clock ownership
+- iOS native preview sync
+- audio duplication / secondary player rules
+- simulator/runtime integration between Flutter, Rust, and native preview
 
 ## Design Direction
 

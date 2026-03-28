@@ -5,12 +5,123 @@ enum PreviewSourceKind {
   image,
 }
 
+class PreviewCompositionNode {
+  const PreviewCompositionNode({
+    required this.clipId,
+    required this.assetId,
+    required this.kind,
+    required this.localPath,
+    this.displayLabel,
+    required this.clipStartSeconds,
+    required this.clipEndSeconds,
+    required this.sourcePositionSeconds,
+    required this.sourceStartSeconds,
+    this.sourceEndSeconds,
+    required this.x,
+    required this.y,
+    required this.width,
+    required this.height,
+    required this.opacity,
+    required this.rotationDegrees,
+    required this.zIndex,
+  });
+
+  final String clipId;
+  final String assetId;
+  final String kind;
+  final String localPath;
+  final String? displayLabel;
+  final double clipStartSeconds;
+  final double clipEndSeconds;
+  final double sourcePositionSeconds;
+  final double sourceStartSeconds;
+  final double? sourceEndSeconds;
+  final double x;
+  final double y;
+  final double width;
+  final double height;
+  final double opacity;
+  final double rotationDegrees;
+  final int zIndex;
+
+  Map<String, dynamic> toMap() {
+    return <String, dynamic>{
+      'clipId': clipId,
+      'assetId': assetId,
+      'kind': kind,
+      'localPath': localPath,
+      'displayLabel': displayLabel,
+      'clipStartSeconds': clipStartSeconds,
+      'clipEndSeconds': clipEndSeconds,
+      'sourcePositionSeconds': sourcePositionSeconds,
+      'sourceStartSeconds': sourceStartSeconds,
+      'sourceEndSeconds': sourceEndSeconds,
+      'x': x,
+      'y': y,
+      'width': width,
+      'height': height,
+      'opacity': opacity,
+      'rotationDegrees': rotationDegrees,
+      'zIndex': zIndex,
+    };
+  }
+}
+
+class PreviewAudioNode {
+  const PreviewAudioNode({
+    required this.clipId,
+    required this.assetId,
+    required this.kind,
+    required this.localPath,
+    this.displayLabel,
+    required this.clipStartSeconds,
+    required this.clipEndSeconds,
+    required this.sourcePositionSeconds,
+    required this.sourceStartSeconds,
+    this.sourceEndSeconds,
+    required this.gain,
+    required this.isMuted,
+  });
+
+  final String clipId;
+  final String assetId;
+  final String kind;
+  final String localPath;
+  final String? displayLabel;
+  final double clipStartSeconds;
+  final double clipEndSeconds;
+  final double sourcePositionSeconds;
+  final double sourceStartSeconds;
+  final double? sourceEndSeconds;
+  final double gain;
+  final bool isMuted;
+
+  Map<String, dynamic> toMap() {
+    return <String, dynamic>{
+      'clipId': clipId,
+      'assetId': assetId,
+      'kind': kind,
+      'localPath': localPath,
+      'displayLabel': displayLabel,
+      'clipStartSeconds': clipStartSeconds,
+      'clipEndSeconds': clipEndSeconds,
+      'sourcePositionSeconds': sourcePositionSeconds,
+      'sourceStartSeconds': sourceStartSeconds,
+      'sourceEndSeconds': sourceEndSeconds,
+      'gain': gain,
+      'isMuted': isMuted,
+    };
+  }
+}
+
 class PreviewSource {
   const PreviewSource({
     required this.id,
     required this.assetId,
     required this.kind,
     required this.localPath,
+    this.clipStartSeconds = 0,
+    this.clipEndSeconds,
     this.durationSeconds,
     this.width,
     this.height,
@@ -23,6 +134,8 @@ class PreviewSource {
   final String assetId;
   final PreviewSourceKind kind;
   final String localPath;
+  final double clipStartSeconds;
+  final double? clipEndSeconds;
   final double? durationSeconds;
   final int? width;
   final int? height;
@@ -44,6 +157,12 @@ class PreviewSource {
 class PreviewBackendState {
   const PreviewBackendState({
     this.source,
+    this.compositionNodes = const <PreviewCompositionNode>[],
+    this.audioNodes = const <PreviewAudioNode>[],
+    this.projectWidth,
+    this.projectHeight,
+    this.baseClipId,
+    this.selectedClipId,
     this.isReady = false,
     this.isPlaying = false,
     this.positionSeconds = 0,
@@ -52,6 +171,12 @@ class PreviewBackendState {
   });
 
   final PreviewSource? source;
+  final List<PreviewCompositionNode> compositionNodes;
+  final List<PreviewAudioNode> audioNodes;
+  final int? projectWidth;
+  final int? projectHeight;
+  final String? baseClipId;
+  final String? selectedClipId;
   final bool isReady;
   final bool isPlaying;
   final double positionSeconds;
@@ -69,6 +194,14 @@ class PreviewBackendState {
   PreviewBackendState copyWith({
     PreviewSource? source,
     bool clearSource = false,
+    List<PreviewCompositionNode>? compositionNodes,
+    List<PreviewAudioNode>? audioNodes,
+    int? projectWidth,
+    int? projectHeight,
+    String? baseClipId,
+    bool clearBaseClipId = false,
+    String? selectedClipId,
+    bool clearSelectedClipId = false,
     bool? isReady,
     bool? isPlaying,
     double? positionSeconds,
@@ -78,6 +211,13 @@ class PreviewBackendState {
   }) {
     return PreviewBackendState(
       source: clearSource ? null : (source ?? this.source),
+      compositionNodes: compositionNodes ?? this.compositionNodes,
+      audioNodes: audioNodes ?? this.audioNodes,
+      projectWidth: projectWidth ?? this.projectWidth,
+      projectHeight: projectHeight ?? this.projectHeight,
+      baseClipId: clearBaseClipId ? null : (baseClipId ?? this.baseClipId),
+      selectedClipId:
+          clearSelectedClipId ? null : (selectedClipId ?? this.selectedClipId),
       isReady: isReady ?? this.isReady,
       isPlaying: isPlaying ?? this.isPlaying,
       positionSeconds: positionSeconds ?? this.positionSeconds,
@@ -101,6 +241,15 @@ abstract class FusionPreviewBackend extends ChangeNotifier {
   Future<void> attachSource(
     PreviewSource? source, {
     bool autoplay = false,
+  });
+
+  Future<void> updateCompositionScene({
+    required int projectWidth,
+    required int projectHeight,
+    required List<PreviewCompositionNode> nodes,
+    required List<PreviewAudioNode> audioNodes,
+    String? baseClipId,
+    String? selectedClipId,
   });
 
   Future<void> play();

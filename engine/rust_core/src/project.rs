@@ -22,6 +22,7 @@ pub struct AssetState {
     pub id: String,
     pub uri: String,
     pub kind: TrackKind,
+    pub label: Option<String>,
     pub duration_seconds: Option<f64>,
     pub width: Option<u32>,
     pub height: Option<u32>,
@@ -35,6 +36,52 @@ pub struct ClipState {
     pub duration_seconds: f64,
     pub clip_type: ClipType,
     pub split_group_id: Option<String>,
+    pub audio_gain: f64,
+    pub is_muted: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct VisualTransformState {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+    pub opacity: f64,
+    pub rotation_degrees: f64,
+    pub z_index: i32,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CompositionNodeState {
+    pub clip_id: String,
+    pub asset_id: String,
+    pub track_kind: TrackKind,
+    pub asset_uri: String,
+    pub display_label: Option<String>,
+    pub clip_start_seconds: f64,
+    pub clip_end_seconds: f64,
+    pub clip_duration_seconds: f64,
+    pub source_start_seconds: f64,
+    pub source_end_seconds: f64,
+    pub source_position_seconds: f64,
+    pub transform: VisualTransformState,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AudioNodeState {
+    pub clip_id: String,
+    pub asset_id: String,
+    pub track_kind: TrackKind,
+    pub asset_uri: String,
+    pub display_label: Option<String>,
+    pub clip_start_seconds: f64,
+    pub clip_end_seconds: f64,
+    pub clip_duration_seconds: f64,
+    pub source_start_seconds: f64,
+    pub source_end_seconds: f64,
+    pub source_position_seconds: f64,
+    pub gain: f64,
+    pub is_muted: bool,
 }
 
 impl ClipState {
@@ -46,6 +93,8 @@ impl ClipState {
             duration_seconds,
             clip_type: ClipType::Media,
             split_group_id: None,
+            audio_gain: 1.0,
+            is_muted: false,
         }
     }
 
@@ -57,6 +106,8 @@ impl ClipState {
             duration_seconds,
             clip_type: ClipType::Placeholder,
             split_group_id: None,
+            audio_gain: 1.0,
+            is_muted: false,
         }
     }
 }
@@ -140,6 +191,8 @@ impl ProjectState {
             duration_seconds: left_duration,
             clip_type: clip.clip_type,
             split_group_id: Some(split_group_id.clone()),
+            audio_gain: clip.audio_gain,
+            is_muted: clip.is_muted,
         };
         let right_clip = ClipState {
             id: format!("{}_b_{split_stamp}", clip.id),
@@ -148,6 +201,8 @@ impl ProjectState {
             duration_seconds: right_duration,
             clip_type: clip.clip_type,
             split_group_id: Some(split_group_id),
+            audio_gain: clip.audio_gain,
+            is_muted: clip.is_muted,
         };
 
         let clips = &mut self.tracks[location.track_index].clips;
@@ -233,6 +288,8 @@ impl ProjectState {
             duration_seconds: original.duration_seconds,
             clip_type: original.clip_type,
             split_group_id: None,
+            audio_gain: original.audio_gain,
+            is_muted: original.is_muted,
         };
 
         self.tracks[location.track_index]
@@ -280,6 +337,8 @@ impl ProjectState {
                 ClipType::Placeholder
             },
             split_group_id: None,
+            audio_gain: 1.0,
+            is_muted: false,
         };
 
         if let Some(track) = self.tracks.iter_mut().find(|track| track.kind == kind) {
@@ -295,6 +354,141 @@ impl ProjectState {
         self.tracks.sort_by_key(|track| track_sort_key(track.kind));
         self.recompute_duration_seconds();
         true
+    }
+
+    pub fn composition_nodes_at(&self, seconds: f64) -> Vec<CompositionNodeState> {
+        let mut nodes = Vec::new();
+
+        for track in &self.tracks {
+            if !is_visual_track(track.kind) {
+                continue;
+            }
+
+            let mut elapsed = 0.0;
+            for clip in &track.clips {
+                let start_seconds = elapsed;
+                let end_seconds = start_seconds + clip.duration_seconds;
+                elapsed = end_seconds;
+
+                if clip.clip_type != ClipType::Media {
+                    continue;
+                }
+                if seconds < start_seconds || seconds > end_seconds + 0.0001 {
+                    continue;
+                }
+
+                let Some(asset_id) = clip.asset_id.as_ref() else {
+                    continue;
+                };
+                let Some(asset) = self.assets.get(asset_id) else {
+                    continue;
+                };
+
+                let source_start_seconds = clip.source_offset_seconds;
+                let source_position_seconds = source_start_seconds
+                    + (seconds - start_seconds).clamp(0.0, clip.duration_seconds);
+
+                nodes.push(CompositionNodeState {
+                    clip_id: clip.id.clone(),
+                    asset_id: asset_id.clone(),
+                    track_kind: track.kind,
+                    asset_uri: asset.uri.clone(),
+                    display_label: asset.label.clone(),
+                    clip_start_seconds: start_seconds,
+                    clip_end_seconds: end_seconds,
+                    clip_duration_seconds: clip.duration_seconds,
+                    source_start_seconds,
+                    source_end_seconds: source_start_seconds + clip.duration_seconds,
+                    source_position_seconds,
+                    transform: default_transform_for_track(self.width, self.height, track.kind),
+                });
+            }
+        }
+
+        nodes.sort_by_key(|node| node.transform.z_index);
+        nodes
+    }
+
+    pub fn set_clip_gain(&mut self, clip_id: &str, gain: f64) -> bool {
+        let Some(location) = self.find_clip(clip_id) else {
+            return false;
+        };
+
+        let clip = &mut self.tracks[location.track_index].clips[location.clip_index];
+        if clip.clip_type != ClipType::Media {
+            return false;
+        }
+
+        let clamped_gain = gain.clamp(0.0, 1.0);
+        clip.audio_gain = clamped_gain;
+        true
+    }
+
+    pub fn set_clip_muted(&mut self, clip_id: &str, is_muted: bool) -> bool {
+        let Some(location) = self.find_clip(clip_id) else {
+            return false;
+        };
+
+        let clip = &mut self.tracks[location.track_index].clips[location.clip_index];
+        if clip.clip_type != ClipType::Media {
+            return false;
+        }
+
+        clip.is_muted = is_muted;
+        true
+    }
+
+    pub fn audio_nodes_at(&self, seconds: f64) -> Vec<AudioNodeState> {
+        let mut nodes = Vec::new();
+
+        for track in &self.tracks {
+            if track.kind != TrackKind::Audio && track.kind != TrackKind::Video {
+                continue;
+            }
+
+            let mut elapsed = 0.0;
+            for clip in &track.clips {
+                let start_seconds = elapsed;
+                let end_seconds = start_seconds + clip.duration_seconds;
+                elapsed = end_seconds;
+
+                if clip.clip_type != ClipType::Media {
+                    continue;
+                }
+                if seconds < start_seconds || seconds > end_seconds + 0.0001 {
+                    continue;
+                }
+
+                let Some(asset_id) = clip.asset_id.as_ref() else {
+                    continue;
+                };
+                let Some(asset) = self.assets.get(asset_id) else {
+                    continue;
+                };
+
+                let source_start_seconds = clip.source_offset_seconds;
+                let source_position_seconds = source_start_seconds
+                    + (seconds - start_seconds).clamp(0.0, clip.duration_seconds);
+
+                nodes.push(AudioNodeState {
+                    clip_id: clip.id.clone(),
+                    asset_id: asset_id.clone(),
+                    track_kind: track.kind,
+                    asset_uri: asset.uri.clone(),
+                    display_label: asset.label.clone(),
+                    clip_start_seconds: start_seconds,
+                    clip_end_seconds: end_seconds,
+                    clip_duration_seconds: clip.duration_seconds,
+                    source_start_seconds,
+                    source_end_seconds: source_start_seconds + clip.duration_seconds,
+                    source_position_seconds,
+                    gain: clip.audio_gain,
+                    is_muted: clip.is_muted,
+                });
+            }
+        }
+
+        nodes
     }
 
     fn recompute_duration_seconds(&mut self) {
@@ -353,6 +547,63 @@ fn build_default_tracks() -> Vec<TrackState> {
     vec![]
 }
 
+fn is_visual_track(kind: TrackKind) -> bool {
+    matches!(
+        kind,
+        TrackKind::Video | TrackKind::Image | TrackKind::Text | TrackKind::LipSync
+    )
+}
+
+fn default_transform_for_track(width: u32, height: u32, kind: TrackKind) -> VisualTransformState {
+    match kind {
+        TrackKind::Video => VisualTransformState {
+            x: 0.0,
+            y: 0.0,
+            width: width as f64,
+            height: height as f64,
+            opacity: 1.0,
+            rotation_degrees: 0.0,
+            z_index: 0,
+        },
+        TrackKind::Image => VisualTransformState {
+            x: 0.0,
+            y: 0.0,
+            width: width as f64,
+            height: height as f64,
+            opacity: 1.0,
+            rotation_degrees: 0.0,
+            z_index: 10,
+        },
+        TrackKind::Text => VisualTransformState {
+            x: width as f64 * 0.111,
+            y: height as f64 * 0.77,
+            width: width as f64 * 0.777,
+            height: height as f64 * 0.114,
+            opacity: 1.0,
+            rotation_degrees: 0.0,
+            z_index: 20,
+        },
+        TrackKind::LipSync => VisualTransformState {
+            x: width as f64 * 0.231,
+            y: height as f64 * 0.656,
+            width: width as f64 * 0.537,
+            height: height as f64 * 0.114,
+            opacity: 1.0,
+            rotation_degrees: 0.0,
+            z_index: 30,
+        },
+        TrackKind::Audio => VisualTransformState {
+            x: 0.0,
+            y: 0.0,
+            width: 0.0,
+            height: 0.0,
+            opacity: 1.0,
+            rotation_degrees: 0.0,
+            z_index: -1,
+        },
+    }
+}
+
 fn track_sort_key(kind: TrackKind) -> u8 {
     match kind {
         TrackKind::Video => 0,
@@ -365,7 +616,7 @@ fn track_sort_key(kind: TrackKind) -> u8 {
 
 #[cfg(test)]
 mod tests {
-    use super::{ClipType, ProjectState, TrackKind};
+    use super::{AssetState, ClipType, ProjectState, TrackKind};
 
     fn project() -> ProjectState {
         ProjectState::new(1080, 1920, 30.0, 48_000, 5.0)
@@ -394,6 +645,114 @@ mod tests {
 
         assert!(project.delete_clip("video-1"));
         assert_eq!(project.duration_seconds, 5.0);
+    }
+
+    #[test]
+    fn composition_snapshot_resolves_clip_source_offsets() {
+        let mut project = project();
+        project.import_asset(AssetState {
+            id: "video-1".into(),
+            uri: "/tmp/video-1.mp4".into(),
+            kind: TrackKind::Video,
+            label: Some("video-1.mp4".into()),
+            duration_seconds: Some(4.0),
+            width: Some(1080),
+            height: Some(1920),
+        });
+
+        assert!(project.insert_clip(TrackKind::Video, "video-1", "video-1", 4.0, true));
+        assert!(project.split_clip("video-1", 1.5));
+
+        let nodes = project.composition_nodes_at(2.0);
+        assert_eq!(nodes.len(), 1);
+        let node = &nodes[0];
+        assert_eq!(node.asset_id, "video-1");
+        assert_eq!(node.clip_id, "video-1_b_1");
+        assert!((node.source_start_seconds - 1.5).abs() < 0.001);
+        assert!((node.source_position_seconds - 2.0).abs() < 0.001);
+        assert!((node.source_end_seconds - 4.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn audio_snapshot_resolves_clip_source_offsets() {
+        let mut project = project();
+        project.import_asset(AssetState {
+            id: "audio-1".into(),
+            uri: "/tmp/audio-1.m4a".into(),
+            kind: TrackKind::Audio,
+            label: Some("audio-1.m4a".into()),
+            duration_seconds: Some(6.0),
+            width: None,
+            height: None,
+        });
+
+        assert!(project.insert_clip(TrackKind::Audio, "audio-1", "audio-1", 6.0, true));
+        assert!(project.split_clip("audio-1", 2.0));
+
+        let nodes = project.audio_nodes_at(3.5);
+        assert_eq!(nodes.len(), 1);
+        let node = &nodes[0];
+        assert_eq!(node.asset_id, "audio-1");
+        assert_eq!(node.track_kind, TrackKind::Audio);
+        assert_eq!(node.display_label.as_deref(), Some("audio-1.m4a"));
+        assert_eq!(node.clip_id, "audio-1_b_1");
+        assert!((node.source_start_seconds - 2.0).abs() < 0.001);
+        assert!((node.source_position_seconds - 3.5).abs() < 0.001);
+        assert!((node.source_end_seconds - 6.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn video_clip_exposes_audio_snapshot_for_mixer_foundation() {
+        let mut project = project();
+        project.import_asset(AssetState {
+            id: "video-audio-1".into(),
+            uri: "/tmp/video-audio-1.mp4".into(),
+            kind: TrackKind::Video,
+            label: Some("video-audio-1.mp4".into()),
+            duration_seconds: Some(5.0),
+            width: Some(1080),
+            height: Some(1920),
+        });
+
+        assert!(project.insert_clip(
+            TrackKind::Video,
+            "video-audio-1",
+            "video-audio-1",
+            5.0,
+            true
+        ));
+
+        let nodes = project.audio_nodes_at(1.25);
+        assert_eq!(nodes.len(), 1);
+        let node = &nodes[0];
+        assert_eq!(node.asset_id, "video-audio-1");
+        assert_eq!(node.track_kind, TrackKind::Video);
+        assert_eq!(node.display_label.as_deref(), Some("video-audio-1.mp4"));
+        assert!((node.source_position_seconds - 1.25).abs() < 0.001);
+    }
+
+    #[test]
+    fn clip_audio_controls_propagate_to_audio_snapshot() {
+        let mut project = project();
+        project.import_asset(AssetState {
+            id: "video-1".into(),
+            uri: "/tmp/video-1.mp4".into(),
+            kind: TrackKind::Video,
+            label: Some("video-1.mp4".into()),
+            duration_seconds: Some(4.0),
+            width: Some(1080),
+            height: Some(1920),
+        });
+
+        assert!(project.insert_clip(TrackKind::Video, "video-1", "video-1", 4.0, true));
+        assert!(project.set_clip_gain("video-1", 0.35));
+        assert!(project.set_clip_muted("video-1", true));
+
+        let nodes = project.audio_nodes_at(1.0);
+        assert_eq!(nodes.len(), 1);
+        let node = &nodes[0];
+        assert!((node.gain - 0.35).abs() < 0.001);
+        assert!(node.is_muted);
     }
 
     #[test]

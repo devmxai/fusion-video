@@ -41,6 +41,7 @@ class EngineAssetDescriptor {
     required this.id,
     required this.uri,
     required this.kind,
+    this.label,
     this.durationSeconds,
     this.width,
     this.height,
@@ -49,6 +50,7 @@ class EngineAssetDescriptor {
   final String id;
   final String uri;
   final EngineTrackKind kind;
+  final String? label;
   final double? durationSeconds;
   final int? width;
   final int? height;
@@ -84,6 +86,8 @@ class EngineTimelineClipSnapshot {
     this.assetId,
     this.sourceOffsetSeconds,
     this.splitGroupId,
+    this.audioGain = 1.0,
+    this.isMuted = false,
   });
 
   final String id;
@@ -92,6 +96,8 @@ class EngineTimelineClipSnapshot {
   final String? assetId;
   final double? sourceOffsetSeconds;
   final String? splitGroupId;
+  final double audioGain;
+  final bool isMuted;
 }
 
 class EngineTimelineTrackSnapshot {
@@ -102,6 +108,88 @@ class EngineTimelineTrackSnapshot {
 
   final EngineTrackKind kind;
   final List<EngineTimelineClipSnapshot> clips;
+}
+
+class EngineVisualTransformSnapshot {
+  const EngineVisualTransformSnapshot({
+    required this.x,
+    required this.y,
+    required this.width,
+    required this.height,
+    required this.opacity,
+    required this.rotationDegrees,
+    required this.zIndex,
+  });
+
+  final double x;
+  final double y;
+  final double width;
+  final double height;
+  final double opacity;
+  final double rotationDegrees;
+  final int zIndex;
+}
+
+class EngineCompositionNodeSnapshot {
+  const EngineCompositionNodeSnapshot({
+    required this.clipId,
+    required this.assetId,
+    required this.trackKind,
+    required this.assetUri,
+    this.displayLabel,
+    required this.clipStartSeconds,
+    required this.clipEndSeconds,
+    required this.clipDurationSeconds,
+    required this.sourceStartSeconds,
+    required this.sourceEndSeconds,
+    required this.sourcePositionSeconds,
+    required this.transform,
+  });
+
+  final String clipId;
+  final String assetId;
+  final EngineTrackKind trackKind;
+  final String assetUri;
+  final String? displayLabel;
+  final double clipStartSeconds;
+  final double clipEndSeconds;
+  final double clipDurationSeconds;
+  final double sourceStartSeconds;
+  final double sourceEndSeconds;
+  final double sourcePositionSeconds;
+  final EngineVisualTransformSnapshot transform;
+}
+
+class EngineAudioNodeSnapshot {
+  const EngineAudioNodeSnapshot({
+    required this.clipId,
+    required this.assetId,
+    required this.trackKind,
+    required this.assetUri,
+    this.displayLabel,
+    required this.clipStartSeconds,
+    required this.clipEndSeconds,
+    required this.clipDurationSeconds,
+    required this.sourceStartSeconds,
+    required this.sourceEndSeconds,
+    required this.sourcePositionSeconds,
+    required this.gain,
+    required this.isMuted,
+  });
+
+  final String clipId;
+  final String assetId;
+  final EngineTrackKind trackKind;
+  final String assetUri;
+  final String? displayLabel;
+  final double clipStartSeconds;
+  final double clipEndSeconds;
+  final double clipDurationSeconds;
+  final double sourceStartSeconds;
+  final double sourceEndSeconds;
+  final double sourcePositionSeconds;
+  final double gain;
+  final bool isMuted;
 }
 
 class EngineInsertClipRequest {
@@ -169,6 +257,18 @@ abstract class FusionVideoEngineBridge {
     String clipId,
   );
 
+  Future<void> setClipGain(
+    EngineProjectHandle handle,
+    String clipId,
+    double gain,
+  );
+
+  Future<void> setClipMuted(
+    EngineProjectHandle handle,
+    String clipId,
+    bool muted,
+  );
+
   Future<void> insertClip(
     EngineProjectHandle handle,
     EngineInsertClipRequest request,
@@ -176,6 +276,16 @@ abstract class FusionVideoEngineBridge {
 
   Future<List<EngineTimelineTrackSnapshot>> fetchTimelineTracks(
     EngineProjectHandle handle,
+  );
+
+  Future<List<EngineCompositionNodeSnapshot>> fetchCompositionNodes(
+    EngineProjectHandle handle,
+    EngineTimelinePosition position,
+  );
+
+  Future<List<EngineAudioNodeSnapshot>> fetchAudioNodes(
+    EngineProjectHandle handle,
+    EngineTimelinePosition position,
   );
 
   Stream<EngineStatusSnapshot> watchStatus(EngineProjectHandle handle);

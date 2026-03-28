@@ -71,6 +71,26 @@ typedef _EngineDuplicateClipNative = ffi.Uint8 Function(
 );
 typedef _EngineDuplicateClipDart = int Function(
     int handle, ffi.Pointer<ffi.Char> clipId);
+typedef _EngineSetClipGainNative = ffi.Uint8 Function(
+  ffi.Int64 handle,
+  ffi.Pointer<ffi.Char> clipId,
+  ffi.Double gain,
+);
+typedef _EngineSetClipGainDart = int Function(
+  int handle,
+  ffi.Pointer<ffi.Char> clipId,
+  double gain,
+);
+typedef _EngineSetClipMutedNative = ffi.Uint8 Function(
+  ffi.Int64 handle,
+  ffi.Pointer<ffi.Char> clipId,
+  ffi.Uint8 isMuted,
+);
+typedef _EngineSetClipMutedDart = int Function(
+  int handle,
+  ffi.Pointer<ffi.Char> clipId,
+  int isMuted,
+);
 typedef _EngineInsertClipNative = ffi.Uint8 Function(
   ffi.Int64 handle,
   ffi.Uint8 trackKind,
@@ -91,6 +111,7 @@ typedef _EngineImportAssetNative = ffi.Uint8 Function(
   ffi.Int64 handle,
   ffi.Pointer<ffi.Char> assetId,
   ffi.Pointer<ffi.Char> uri,
+  ffi.Pointer<ffi.Char> label,
   ffi.Uint8 kind,
   ffi.Double durationSeconds,
   ffi.Int32 width,
@@ -100,6 +121,7 @@ typedef _EngineImportAssetDart = int Function(
   int handle,
   ffi.Pointer<ffi.Char> assetId,
   ffi.Pointer<ffi.Char> uri,
+  ffi.Pointer<ffi.Char> label,
   int kind,
   double durationSeconds,
   int width,
@@ -116,6 +138,26 @@ typedef _EngineIsBufferingDart = int Function(int handle);
 typedef _EngineGetTimelineJsonNative = ffi.Pointer<Utf8> Function(
     ffi.Int64 handle);
 typedef _EngineGetTimelineJsonDart = ffi.Pointer<Utf8> Function(int handle);
+typedef _EngineGetCompositionJsonNative = ffi.Pointer<Utf8> Function(
+  ffi.Int64 handle,
+  ffi.Double seconds,
+  ffi.Int64 frame,
+);
+typedef _EngineGetCompositionJsonDart = ffi.Pointer<Utf8> Function(
+  int handle,
+  double seconds,
+  int frame,
+);
+typedef _EngineGetAudioJsonNative = ffi.Pointer<Utf8> Function(
+  ffi.Int64 handle,
+  ffi.Double seconds,
+  ffi.Int64 frame,
+);
+typedef _EngineGetAudioJsonDart = ffi.Pointer<Utf8> Function(
+  int handle,
+  double seconds,
+  int frame,
+);
 typedef _EngineFreeStringNative = ffi.Void Function(ffi.Pointer<Utf8> value);
 typedef _EngineFreeStringDart = void Function(ffi.Pointer<Utf8> value);
 
@@ -156,6 +198,10 @@ class FusionVideoFfiBridge implements FusionVideoEngineBridge {
         _engineDuplicateClip = library.lookupFunction<
             _EngineDuplicateClipNative,
             _EngineDuplicateClipDart>('fusion_video_engine_duplicate_clip'),
+        _engineSetClipGain = library.lookupFunction<_EngineSetClipGainNative,
+            _EngineSetClipGainDart>('fusion_video_engine_set_clip_gain'),
+        _engineSetClipMuted = library.lookupFunction<_EngineSetClipMutedNative,
+            _EngineSetClipMutedDart>('fusion_video_engine_set_clip_muted'),
         _engineInsertClip = library.lookupFunction<_EngineInsertClipNative,
             _EngineInsertClipDart>('fusion_video_engine_insert_clip'),
         _engineImportAsset = library.lookupFunction<_EngineImportAssetNative,
@@ -176,6 +222,11 @@ class FusionVideoFfiBridge implements FusionVideoEngineBridge {
         _engineGetTimelineJson = library.lookupFunction<
                 _EngineGetTimelineJsonNative, _EngineGetTimelineJsonDart>(
             'fusion_video_engine_get_timeline_json'),
+        _engineGetCompositionJson = library.lookupFunction<
+                _EngineGetCompositionJsonNative, _EngineGetCompositionJsonDart>(
+            'fusion_video_engine_get_composition_json'),
+        _engineGetAudioJson = library.lookupFunction<_EngineGetAudioJsonNative,
+            _EngineGetAudioJsonDart>('fusion_video_engine_get_audio_json'),
         _engineFreeString = library
             .lookupFunction<_EngineFreeStringNative, _EngineFreeStringDart>(
           'fusion_video_engine_free_string',
@@ -192,6 +243,8 @@ class FusionVideoFfiBridge implements FusionVideoEngineBridge {
   final _EngineTrimClipRightDart _engineTrimClipRight;
   final _EngineDeleteClipDart _engineDeleteClip;
   final _EngineDuplicateClipDart _engineDuplicateClip;
+  final _EngineSetClipGainDart _engineSetClipGain;
+  final _EngineSetClipMutedDart _engineSetClipMuted;
   final _EngineInsertClipDart _engineInsertClip;
   final _EngineImportAssetDart _engineImportAsset;
   final _EngineGetPlaybackStateDart _engineGetPlaybackState;
@@ -199,6 +252,8 @@ class FusionVideoFfiBridge implements FusionVideoEngineBridge {
   final _EngineGetPositionFrameDart _engineGetPositionFrame;
   final _EngineIsBufferingDart _engineIsBuffering;
   final _EngineGetTimelineJsonDart _engineGetTimelineJson;
+  final _EngineGetCompositionJsonDart _engineGetCompositionJson;
+  final _EngineGetAudioJsonDart _engineGetAudioJson;
   final _EngineFreeStringDart _engineFreeString;
 
   final Map<int, _FfiProjectFeed> _projects = {};
@@ -218,7 +273,7 @@ class FusionVideoFfiBridge implements FusionVideoEngineBridge {
 
   static ffi.DynamicLibrary? _tryLoadLibrary() {
     try {
-      if (Platform.isIOS || Platform.isMacOS) {
+      if (Platform.isIOS) {
         return ffi.DynamicLibrary.process();
       }
     } catch (_) {
@@ -277,12 +332,14 @@ class FusionVideoFfiBridge implements FusionVideoEngineBridge {
 
     final snapshot = _readSnapshot(handleId);
     final previous = feed.lastSnapshot;
+    final secondChangedWhileStopped = previous != null &&
+        snapshot.playbackState != EnginePlaybackState.playing &&
+        (previous.position.seconds - snapshot.position.seconds).abs() > 0.0001;
     final changed = force ||
         previous == null ||
         previous.playbackState != snapshot.playbackState ||
         previous.position.frame != snapshot.position.frame ||
-        (previous.position.seconds - snapshot.position.seconds).abs() >
-            0.0001 ||
+        secondChangedWhileStopped ||
         previous.isBuffering != snapshot.isBuffering;
 
     if (!changed) {
@@ -368,12 +425,16 @@ class FusionVideoFfiBridge implements FusionVideoEngineBridge {
   ) async {
     final nativeAssetId = asset.id.toNativeUtf8();
     final nativeUri = asset.uri.toNativeUtf8();
+    final nativeLabel = (asset.label != null && asset.label!.isNotEmpty)
+        ? asset.label!.toNativeUtf8()
+        : null;
     try {
       _ensureSuccess(
         _engineImportAsset(
           handle.id,
           nativeAssetId.cast(),
           nativeUri.cast(),
+          nativeLabel?.cast() ?? ffi.nullptr,
           asset.kind.index,
           asset.durationSeconds ?? 0,
           asset.width ?? 0,
@@ -384,6 +445,9 @@ class FusionVideoFfiBridge implements FusionVideoEngineBridge {
     } finally {
       malloc.free(nativeAssetId);
       malloc.free(nativeUri);
+      if (nativeLabel != null) {
+        malloc.free(nativeLabel);
+      }
     }
   }
 
@@ -504,6 +568,41 @@ class FusionVideoFfiBridge implements FusionVideoEngineBridge {
   }
 
   @override
+  Future<void> setClipGain(
+    EngineProjectHandle handle,
+    String clipId,
+    double gain,
+  ) async {
+    final nativeClipId = clipId.toNativeUtf8();
+    try {
+      _ensureSuccess(
+        _engineSetClipGain(
+            handle.id, nativeClipId.cast(), gain.clamp(0.0, 1.0)),
+        'set clip gain',
+      );
+    } finally {
+      malloc.free(nativeClipId);
+    }
+  }
+
+  @override
+  Future<void> setClipMuted(
+    EngineProjectHandle handle,
+    String clipId,
+    bool muted,
+  ) async {
+    final nativeClipId = clipId.toNativeUtf8();
+    try {
+      _ensureSuccess(
+        _engineSetClipMuted(handle.id, nativeClipId.cast(), muted ? 1 : 0),
+        'set clip muted state',
+      );
+    } finally {
+      malloc.free(nativeClipId);
+    }
+  }
+
+  @override
   Future<void> insertClip(
     EngineProjectHandle handle,
     EngineInsertClipRequest request,
@@ -554,12 +653,111 @@ class FusionVideoFfiBridge implements FusionVideoEngineBridge {
             sourceOffsetSeconds:
                 (clipMap['source_offset_seconds'] as num?)?.toDouble(),
             splitGroupId: clipMap['split_group_id'] as String?,
+            audioGain: ((clipMap['audio_gain'] as num?) ?? 1).toDouble(),
+            isMuted: (clipMap['is_muted'] as bool?) ?? false,
           );
         }).toList(growable: false);
 
         return EngineTimelineTrackSnapshot(
           kind: _parseTrackKind(trackMap['kind'] as String),
           clips: clips,
+        );
+      }).toList(growable: false);
+    } finally {
+      _engineFreeString(pointer);
+    }
+  }
+
+  @override
+  Future<List<EngineCompositionNodeSnapshot>> fetchCompositionNodes(
+    EngineProjectHandle handle,
+    EngineTimelinePosition position,
+  ) async {
+    final pointer = _engineGetCompositionJson(
+      handle.id,
+      position.seconds,
+      position.frame,
+    );
+    if (pointer == ffi.nullptr) {
+      throw StateError(
+        'Fusion Video engine failed to fetch composition snapshot.',
+      );
+    }
+
+    try {
+      final jsonString = pointer.toDartString();
+      final decoded = jsonDecode(jsonString) as List<dynamic>;
+      return decoded.map((dynamic nodeEntry) {
+        final nodeMap = nodeEntry as Map<String, dynamic>;
+        final transformMap = nodeMap['transform'] as Map<String, dynamic>;
+        return EngineCompositionNodeSnapshot(
+          clipId: nodeMap['clip_id'] as String,
+          assetId: nodeMap['asset_id'] as String,
+          trackKind: _parseTrackKind(nodeMap['track_kind'] as String),
+          assetUri: nodeMap['asset_uri'] as String,
+          displayLabel: nodeMap['display_label'] as String?,
+          clipStartSeconds: (nodeMap['clip_start_seconds'] as num).toDouble(),
+          clipEndSeconds: (nodeMap['clip_end_seconds'] as num).toDouble(),
+          clipDurationSeconds:
+              (nodeMap['clip_duration_seconds'] as num).toDouble(),
+          sourceStartSeconds:
+              (nodeMap['source_start_seconds'] as num).toDouble(),
+          sourceEndSeconds: (nodeMap['source_end_seconds'] as num).toDouble(),
+          sourcePositionSeconds:
+              (nodeMap['source_position_seconds'] as num).toDouble(),
+          transform: EngineVisualTransformSnapshot(
+            x: (transformMap['x'] as num).toDouble(),
+            y: (transformMap['y'] as num).toDouble(),
+            width: (transformMap['width'] as num).toDouble(),
+            height: (transformMap['height'] as num).toDouble(),
+            opacity: (transformMap['opacity'] as num).toDouble(),
+            rotationDegrees:
+                (transformMap['rotation_degrees'] as num).toDouble(),
+            zIndex: (transformMap['z_index'] as num).toInt(),
+          ),
+        );
+      }).toList(growable: false);
+    } finally {
+      _engineFreeString(pointer);
+    }
+  }
+
+  @override
+  Future<List<EngineAudioNodeSnapshot>> fetchAudioNodes(
+    EngineProjectHandle handle,
+    EngineTimelinePosition position,
+  ) async {
+    final pointer = _engineGetAudioJson(
+      handle.id,
+      position.seconds,
+      position.frame,
+    );
+    if (pointer == ffi.nullptr) {
+      throw StateError('Fusion Video engine failed to fetch audio snapshot.');
+    }
+
+    try {
+      final jsonString = pointer.toDartString();
+      final decoded = jsonDecode(jsonString) as List<dynamic>;
+      return decoded.map((dynamic nodeEntry) {
+        final nodeMap = nodeEntry as Map<String, dynamic>;
+        return EngineAudioNodeSnapshot(
+          clipId: nodeMap['clip_id'] as String,
+          assetId: nodeMap['asset_id'] as String,
+          trackKind: _parseTrackKind(nodeMap['track_kind'] as String),
+          assetUri: nodeMap['asset_uri'] as String,
+          displayLabel: nodeMap['display_label'] as String?,
+          clipStartSeconds: (nodeMap['clip_start_seconds'] as num).toDouble(),
+          clipEndSeconds: (nodeMap['clip_end_seconds'] as num).toDouble(),
+          clipDurationSeconds:
+              (nodeMap['clip_duration_seconds'] as num).toDouble(),
+          sourceStartSeconds:
+              (nodeMap['source_start_seconds'] as num).toDouble(),
+          sourceEndSeconds: (nodeMap['source_end_seconds'] as num).toDouble(),
+          sourcePositionSeconds:
+              (nodeMap['source_position_seconds'] as num).toDouble(),
+          gain: (nodeMap['gain'] as num).toDouble(),
+          isMuted: (nodeMap['is_muted'] as bool?) ?? false,
         );
       }).toList(growable: false);
     } finally {
