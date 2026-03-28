@@ -14,3 +14,16 @@ Planned structure:
   - Android media/render integration
 
 This layer is intentionally separate from Flutter UI code.
+
+## Build
+
+See:
+
+- `../docs/ENGINE_BUILD.md`
+
+Key scripts:
+
+- `../scripts/setup_engine_toolchain.sh`
+- `../scripts/build_engine_host.sh`
+- `../scripts/build_engine_ios.sh`
+- `../scripts/build_engine_android.sh`

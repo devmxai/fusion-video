@@ -44,3 +44,6 @@ app.*.map.json
 
 # Native engine build outputs
 /engine/rust_core/target/
+/engine/build/
+/ios/Frameworks/
+/android/app/src/main/jniLibs/

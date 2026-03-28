@@ -9,12 +9,20 @@ class EditorToolsBar extends StatelessWidget {
     this.embedded = false,
     this.isPlaying = false,
     this.onSplit,
+    this.onTrimRight,
+    this.onTrimLeft,
+    this.onDuplicate,
+    this.onDelete,
     this.onPlayToggle,
   });
 
   final bool embedded;
   final bool isPlaying;
   final VoidCallback? onSplit;
+  final VoidCallback? onTrimRight;
+  final VoidCallback? onTrimLeft;
+  final VoidCallback? onDuplicate;
+  final VoidCallback? onDelete;
   final VoidCallback? onPlayToggle;
 
   @override
@@ -37,26 +45,36 @@ class EditorToolsBar extends StatelessWidget {
             onPressed: onSplit,
           ),
           const SizedBox(width: 5),
-          const FxIconButton(
+          FxIconButton(
             icon: Icons.keyboard_tab_rounded,
             size: 30,
             iconScale: 0.4,
+            onPressed: onTrimRight,
           ),
           const SizedBox(width: 5),
           Transform(
             alignment: Alignment.center,
             transform: Matrix4.rotationY(3.14159),
-            child: const FxIconButton(
+            child: FxIconButton(
               icon: Icons.keyboard_tab_rounded,
               size: 30,
               iconScale: 0.4,
+              onPressed: onTrimLeft,
             ),
           ),
           const SizedBox(width: 5),
-          const FxIconButton(
+          FxIconButton(
+            icon: Icons.copy_rounded,
+            size: 30,
+            iconScale: 0.4,
+            onPressed: onDuplicate,
+          ),
+          const SizedBox(width: 5),
+          FxIconButton(
             icon: Icons.delete_outline_rounded,
             size: 30,
             iconScale: 0.4,
+            onPressed: onDelete,
           ),
           const Spacer(),
           FxIconButton(

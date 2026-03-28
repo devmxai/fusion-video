@@ -5,6 +5,7 @@
 //! decoding, or rendering logic is implemented.
 
 pub mod api;
+pub mod ffi;
 pub mod project;
 pub mod timeline;
 

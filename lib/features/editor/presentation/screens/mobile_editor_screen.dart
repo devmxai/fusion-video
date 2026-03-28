@@ -1,6 +1,14 @@
-import 'package:flutter/material.dart';
-import 'package:flutter/scheduler.dart';
+import 'dart:async';
+import 'dart:io';
+import 'dart:ui' as ui;
 
+import 'package:file_picker/file_picker.dart';
+import 'package:flutter/material.dart';
+import 'package:image_picker/image_picker.dart';
+import 'package:video_player/video_player.dart';
+
+import '../../../../core/engine/engine_contract.dart';
+import '../../../../core/engine/engine_session_controller.dart';
 import '../../../../core/theme/app_theme.dart';
 import '../models/editor_media_tab.dart';
 import '../models/mock_asset_item.dart';
@@ -19,183 +27,380 @@ class MobileEditorScreen extends StatefulWidget {
   State<MobileEditorScreen> createState() => _MobileEditorScreenState();
 }
 
-class _MobileEditorScreenState extends State<MobileEditorScreen>
-    with TickerProviderStateMixin {
+class _MobileEditorScreenState extends State<MobileEditorScreen> {
   static const double _timelineDuration = 5;
+  final ImagePicker _imagePicker = ImagePicker();
 
   EditorMediaTab activeTab = EditorMediaTab.video;
-  late final Ticker _playbackTicker;
-  Duration? _lastPlaybackTick;
-  bool _isPlaying = false;
-  double _currentSeconds = 0;
-  String? _selectedClipId = 'video-1';
-  late List<TimelineTrackData> _tracks;
-
-  static const mockAssets = <MockAssetItem>[
-    MockAssetItem(
-        id: 'v1', tab: EditorMediaTab.video, label: 'Travel Story', tone: 28),
-    MockAssetItem(
-        id: 'v2', tab: EditorMediaTab.video, label: 'Portrait Reel', tone: 210),
-    MockAssetItem(
-        id: 'i1', tab: EditorMediaTab.image, label: 'Cover Image', tone: 36),
-    MockAssetItem(
-        id: 'i2', tab: EditorMediaTab.image, label: 'Sticker Pack', tone: 162),
-    MockAssetItem(
-        id: 'a1', tab: EditorMediaTab.audio, label: 'Voice Track', tone: 286),
-    MockAssetItem(
-        id: 'a2', tab: EditorMediaTab.audio, label: 'Ambient Bed', tone: 248),
-    MockAssetItem(
-        id: 't1', tab: EditorMediaTab.text, label: 'Title Preset', tone: 118),
-    MockAssetItem(
-        id: 't2', tab: EditorMediaTab.text, label: 'Caption Block', tone: 78),
-    MockAssetItem(
-        id: 'l1',
-        tab: EditorMediaTab.lipSync,
-        label: 'Arabic Mouth Pack',
-        tone: 342),
-  ];
+  late final FusionVideoEngineSessionController _engineController;
+  late final ValueNotifier<List<MockAssetItem>> _assetLibrary;
+  VideoPlayerController? _previewVideoController;
+  String? _previewAssetId;
+  Size? _workspaceSize;
+  bool _isSyncingVideoFromTimeline = false;
+  bool _isTimelineScrubbing = false;
+  DateTime? _lastPreviewSyncAt;
+  Timer? _previewSeekDebounce;
+  double? _pendingPreviewSeekSeconds;
+  bool _previewSeekInFlight = false;
 
   @override
   void initState() {
     super.initState();
-    _tracks = buildMockTimelineTracks();
-    _playbackTicker = createTicker(_handlePlaybackTick);
+    _engineController = FusionVideoEngineSessionController(
+      config: const EngineProjectConfig(
+        width: 1080,
+        height: 1920,
+        fps: 30,
+        sampleRate: 48000,
+        durationSeconds: _timelineDuration,
+      ),
+    );
+    _assetLibrary = ValueNotifier<List<MockAssetItem>>(
+      const <MockAssetItem>[],
+    );
+    _engineController.addListener(_handleEngineChanged);
+    unawaited(_engineController.initialize());
   }
 
   @override
   void dispose() {
-    _playbackTicker.dispose();
+    _engineController.removeListener(_handleEngineChanged);
+    unawaited(_engineController.shutdown());
+    _previewSeekDebounce?.cancel();
+    _previewVideoController?.removeListener(_handlePreviewVideoChanged);
+    unawaited(_previewVideoController?.dispose() ?? Future<void>.value());
+    _engineController.dispose();
+    _assetLibrary.dispose();
     super.dispose();
   }
 
-  void _handlePlaybackTick(Duration elapsed) {
-    if (!_isPlaying) {
-      return;
-    }
-
-    if (_lastPlaybackTick == null) {
-      _lastPlaybackTick = elapsed;
-      return;
-    }
-
-    final deltaSeconds =
-        (elapsed - _lastPlaybackTick!).inMicroseconds / 1000000.0;
-    _lastPlaybackTick = elapsed;
-    if (deltaSeconds <= 0) {
-      return;
-    }
-
-    final nextSeconds = (_currentSeconds + deltaSeconds).clamp(
-      0.0,
-      _timelineDuration,
-    );
-
+  void _handleEngineChanged() {
     if (!mounted) {
       return;
     }
 
-    setState(() {
-      _currentSeconds = nextSeconds;
-    });
-
-    if (nextSeconds >= _timelineDuration) {
-      _togglePlayback(forceStop: true);
-    }
-  }
-
-  void _togglePlayback({bool forceStop = false}) {
-    if (_isPlaying || forceStop) {
-      _playbackTicker.stop();
-      setState(() {
-        _isPlaying = false;
-      });
-      _lastPlaybackTick = null;
-      return;
-    }
-
-    _lastPlaybackTick = null;
-    setState(() {
-      _isPlaying = true;
-    });
-    _playbackTicker.start();
+    setState(() {});
   }
 
   void _setCurrentSeconds(double value) {
-    final next = value.clamp(0.0, _timelineDuration);
-    if ((next - _currentSeconds).abs() < 0.001) {
-      return;
+    unawaited(_engineController.seekSeconds(value));
+    final controller = _previewVideoController;
+    if (controller != null &&
+        controller.value.isInitialized &&
+        !controller.value.isPlaying) {
+      _schedulePreviewSeek(value, immediate: !_isTimelineScrubbing);
     }
-    setState(() {
-      _currentSeconds = next;
-    });
   }
 
-  void _selectClip(String clipId) {
-    setState(() {
-      _selectedClipId = clipId;
-    });
-  }
-
-  void _splitSelectedClip() {
-    final selectedClipId = _selectedClipId;
-    if (selectedClipId == null) {
+  void _schedulePreviewSeek(double seconds, {bool immediate = false}) {
+    _pendingPreviewSeekSeconds = seconds;
+    if (immediate) {
+      _flushPreviewSeek();
       return;
     }
+    _previewSeekDebounce ??= Timer(
+      Duration(milliseconds: _isTimelineScrubbing ? 48 : 16),
+      _flushPreviewSeek,
+    );
+  }
 
-    final updatedTracks = <TimelineTrackData>[];
-    var didSplit = false;
-    final splitStamp = DateTime.now().microsecondsSinceEpoch.toString();
-
-    for (final track in _tracks) {
-      var elapsed = 0.0;
-      final nextClips = <TimelineClipData>[];
-
-      for (final clip in track.clips) {
-        final start = elapsed;
-        final end = start + clip.duration;
-        elapsed = end;
-
-        if (!didSplit &&
-            clip.id == selectedClipId &&
-            clip.type == TimelineClipType.media &&
-            _currentSeconds > start + 0.05 &&
-            _currentSeconds < end - 0.05) {
-          final leftDuration = _currentSeconds - start;
-          final rightDuration = end - _currentSeconds;
-          final splitGroupId = 'bridge_$splitStamp';
-
-          final leftClip = clip.copyWith(
-            id: '${clip.id}_a_$splitStamp',
-            duration: leftDuration,
-            splitGroupId: splitGroupId,
-          );
-          final rightClip = clip.copyWith(
-            id: '${clip.id}_b_$splitStamp',
-            duration: rightDuration,
-            splitGroupId: splitGroupId,
-          );
-
-          nextClips
-            ..add(leftClip)
-            ..add(rightClip);
-          didSplit = true;
-          continue;
+  void _flushPreviewSeek() {
+    _previewSeekDebounce?.cancel();
+    _previewSeekDebounce = null;
+    if (_previewSeekInFlight) {
+      return;
+    }
+    final controller = _previewVideoController;
+    final pending = _pendingPreviewSeekSeconds;
+    if (controller == null ||
+        !controller.value.isInitialized ||
+        pending == null) {
+      return;
+    }
+    _pendingPreviewSeekSeconds = null;
+    _previewSeekInFlight = true;
+    _isSyncingVideoFromTimeline = true;
+    unawaited(
+      controller
+          .seekTo(Duration(milliseconds: (pending * 1000).round()))
+          .whenComplete(() {
+        _previewSeekInFlight = false;
+        _isSyncingVideoFromTimeline = false;
+        if (_pendingPreviewSeekSeconds != null) {
+          _previewSeekDebounce =
+              Timer(const Duration(milliseconds: 16), _flushPreviewSeek);
         }
+        if (mounted) {
+          setState(() {});
+        }
+      }),
+    );
+  }
 
-        nextClips.add(clip);
+  double get _effectiveCurrentSeconds {
+    final controller = _previewVideoController;
+    if (controller != null && controller.value.isInitialized) {
+      return controller.value.position.inMicroseconds /
+          Duration.microsecondsPerSecond;
+    }
+    return _engineController.currentSeconds;
+  }
+
+  bool get _effectiveIsPlaying {
+    final controller = _previewVideoController;
+    if (controller != null && controller.value.isInitialized) {
+      return controller.value.isPlaying;
+    }
+    return _engineController.isPlaying;
+  }
+
+  double get _effectiveTimelineDuration {
+    final controller = _previewVideoController;
+    final engineDuration = _engineController.durationSeconds;
+    if (controller == null || !controller.value.isInitialized) {
+      return engineDuration;
+    }
+    final previewDuration = controller.value.duration.inMicroseconds /
+        Duration.microsecondsPerSecond;
+    return previewDuration > engineDuration ? previewDuration : engineDuration;
+  }
+
+  MockAssetItem? get _previewAsset {
+    final previewAssetId = _previewAssetId;
+    if (previewAssetId == null) {
+      return null;
+    }
+    for (final asset in _assetLibrary.value) {
+      if (asset.id == previewAssetId) {
+        return asset;
+      }
+    }
+    return null;
+  }
+
+  double? get _workspaceAspectRatio {
+    final size = _workspaceSize;
+    if (size != null && size.height > 0) {
+      return size.width / size.height;
+    }
+    return _previewAsset?.aspectRatio;
+  }
+
+  Future<void> _togglePlayback() async {
+    final controller = _previewVideoController;
+    if (controller != null && controller.value.isInitialized) {
+      if (controller.value.isPlaying) {
+        await controller.pause();
+        await _engineController.pause();
+      } else {
+        if (controller.value.position >= controller.value.duration &&
+            controller.value.duration > Duration.zero) {
+          await controller.seekTo(Duration.zero);
+          await _engineController.seekSeconds(0);
+        }
+        await controller.play();
+        await _engineController.play();
+      }
+      if (mounted) {
+        setState(() {});
+      }
+      return;
+    }
+    await _engineController.togglePlayback();
+  }
+
+  Future<void> _syncCurrentTimeBeforeEdit(
+      Future<void> Function() action) async {
+    await _engineController.seekSeconds(_effectiveCurrentSeconds);
+    await action();
+  }
+
+  void _handleClipSelected(String clipId) {
+    _engineController.selectClip(clipId);
+    MockAssetItem? asset;
+    for (final item in _assetLibrary.value) {
+      if (item.id == clipId) {
+        asset = item;
+        break;
+      }
+    }
+    if (asset != null && asset.isVisual) {
+      unawaited(_activatePreviewForAsset(asset));
+    }
+  }
+
+  void _handlePreviewVideoChanged() {
+    final controller = _previewVideoController;
+    if (!mounted || controller == null || !controller.value.isInitialized) {
+      return;
+    }
+
+    if (!controller.value.isPlaying &&
+        _engineController.isPlaying &&
+        controller.value.duration > Duration.zero &&
+        controller.value.position >=
+            controller.value.duration - const Duration(milliseconds: 40)) {
+      unawaited(_engineController.pause());
+    }
+
+    setState(() {});
+
+    if (_isSyncingVideoFromTimeline) {
+      return;
+    }
+
+    final now = DateTime.now();
+    if (_lastPreviewSyncAt != null &&
+        now.difference(_lastPreviewSyncAt!) <
+            const Duration(milliseconds: 80)) {
+      return;
+    }
+    _lastPreviewSyncAt = now;
+    unawaited(_engineController.seekSeconds(_effectiveCurrentSeconds));
+  }
+
+  void _handleTimelineScrubStateChanged(bool isActive) {
+    if (_isTimelineScrubbing == isActive) {
+      return;
+    }
+    _isTimelineScrubbing = isActive;
+    if (!isActive) {
+      _flushPreviewSeek();
+    }
+  }
+
+  void _replaceAsset(MockAssetItem updatedAsset) {
+    final nextAssets = _assetLibrary.value
+        .map((item) => item.id == updatedAsset.id ? updatedAsset : item)
+        .toList(growable: false);
+    _assetLibrary.value = nextAssets;
+  }
+
+  Future<MockAssetItem> _ensureAssetMetadata(MockAssetItem asset) async {
+    if (asset.localPath == null) {
+      return asset;
+    }
+
+    if (asset.tab == EditorMediaTab.video &&
+        (asset.durationSeconds == null ||
+            asset.width == null ||
+            asset.height == null)) {
+      final metadata = await _readVideoMetadata(asset.localPath!);
+      final updatedAsset = asset.copyWith(
+        durationSeconds: metadata.durationSeconds,
+        width: metadata.width,
+        height: metadata.height,
+      );
+      _replaceAsset(updatedAsset);
+      return updatedAsset;
+    }
+
+    if (asset.tab == EditorMediaTab.image &&
+        (asset.width == null || asset.height == null)) {
+      final metadata = await _readImageMetadata(asset.localPath!);
+      final updatedAsset = asset.copyWith(
+        width: metadata.width,
+        height: metadata.height,
+      );
+      _replaceAsset(updatedAsset);
+      return updatedAsset;
+    }
+
+    return asset;
+  }
+
+  Future<void> _activatePreviewForAsset(
+    MockAssetItem asset, {
+    bool autoplay = false,
+  }) async {
+    if (!asset.isVisual) {
+      return;
+    }
+
+    _previewAssetId = asset.id;
+    var preparedAsset = asset;
+    if ((asset.width == null || asset.height == null) &&
+        asset.localPath != null) {
+      preparedAsset = await _ensureAssetMetadata(asset);
+    }
+    if (preparedAsset.width != null && preparedAsset.height != null) {
+      _workspaceSize = Size(
+        preparedAsset.width!.toDouble(),
+        preparedAsset.height!.toDouble(),
+      );
+    }
+
+    if (preparedAsset.tab == EditorMediaTab.video &&
+        preparedAsset.localPath != null) {
+      final previousController = _previewVideoController;
+      previousController?.removeListener(_handlePreviewVideoChanged);
+      await previousController?.dispose();
+
+      final controller =
+          VideoPlayerController.file(File(preparedAsset.localPath!));
+      await controller.initialize();
+      await controller.setLooping(false);
+      final videoSize = controller.value.size;
+      if (videoSize.width > 0 && videoSize.height > 0) {
+        _workspaceSize = Size(videoSize.width, videoSize.height);
+      }
+      controller.addListener(_handlePreviewVideoChanged);
+      _previewVideoController = controller;
+      if (autoplay) {
+        await controller.play();
+      }
+      if (mounted) {
+        setState(() {});
+      }
+      return;
+    }
+
+    final previousController = _previewVideoController;
+    previousController?.removeListener(_handlePreviewVideoChanged);
+    await previousController?.dispose();
+    _previewVideoController = null;
+    if (mounted) {
+      setState(() {});
+    }
+  }
+
+  Widget _buildPreviewContent() {
+    final asset = _previewAsset;
+    if (asset == null) {
+      return const SizedBox.expand();
+    }
+
+    if (asset.tab == EditorMediaTab.video) {
+      final controller = _previewVideoController;
+      if (controller == null || !controller.value.isInitialized) {
+        return const SizedBox.expand();
       }
 
-      updatedTracks.add(track.copyWith(clips: nextClips));
+      final videoSize = controller.value.size;
+      return SizedBox.expand(
+        child: FittedBox(
+          fit: BoxFit.cover,
+          child: SizedBox(
+            width: videoSize.width,
+            height: videoSize.height,
+            child: VideoPlayer(controller),
+          ),
+        ),
+      );
     }
 
-    if (!didSplit) {
-      return;
+    if (asset.tab == EditorMediaTab.image && asset.localPath != null) {
+      return SizedBox.expand(
+        child: Image.file(
+          File(asset.localPath!),
+          fit: BoxFit.cover,
+          errorBuilder: (_, __, ___) => const SizedBox.expand(),
+        ),
+      );
     }
 
-    setState(() {
-      _tracks = updatedTracks;
-      _selectedClipId = '${selectedClipId}_b_$splitStamp';
-    });
+    return const SizedBox.expand();
   }
 
   Future<void> _openMediaSheet(EditorMediaTab tab) async {
@@ -208,14 +413,259 @@ class _MobileEditorScreenState extends State<MobileEditorScreen>
       builder: (context) {
         return MediaBottomSheet(
           activeTab: activeTab,
-          assets: mockAssets,
+          assetsListenable: _assetLibrary,
+          onImportTap: _importAssetForTab,
+          onAssetAdd: _addAssetToTimeline,
         );
       },
     );
   }
 
+  Future<void> _importAssetForTab(EditorMediaTab tab) async {
+    try {
+      if (tab == EditorMediaTab.text || tab == EditorMediaTab.lipSync) {
+        final label =
+            tab == EditorMediaTab.text ? 'Text Layer' : 'Lip Sync Layer';
+        final newAsset = MockAssetItem(
+          id: '${tab.name}_${DateTime.now().microsecondsSinceEpoch}',
+          tab: tab,
+          label: label,
+          tone: 40 + (_assetLibrary.value.length * 37) % 300,
+        );
+        _assetLibrary.value = [..._assetLibrary.value, newAsset];
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('$label created'),
+            duration: const Duration(milliseconds: 1000),
+          ),
+        );
+        return;
+      }
+
+      final importedFile = await _pickAssetForTab(tab);
+      if (importedFile == null) {
+        return;
+      }
+
+      final id = '${tab.name}_${DateTime.now().microsecondsSinceEpoch}';
+      final newAsset = MockAssetItem(
+        id: id,
+        tab: tab,
+        label: importedFile.name,
+        tone: 40 + (_assetLibrary.value.length * 37) % 300,
+        localPath: importedFile.path,
+        isImported: true,
+        width: importedFile.width,
+        height: importedFile.height,
+      );
+
+      _assetLibrary.value = [..._assetLibrary.value, newAsset];
+
+      if (!mounted) {
+        return;
+      }
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('${importedFile.name} imported successfully'),
+          duration: const Duration(milliseconds: 1200),
+        ),
+      );
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Import failed: $error'),
+          duration: const Duration(milliseconds: 2200),
+        ),
+      );
+    }
+  }
+
+  Future<_ImportedAssetFile?> _pickAssetForTab(EditorMediaTab tab) async {
+    switch (tab) {
+      case EditorMediaTab.video:
+        final file = await _imagePicker.pickVideo(
+          source: ImageSource.gallery,
+        );
+        if (file == null) {
+          return null;
+        }
+        return _ImportedAssetFile(
+          path: file.path,
+          name: file.name,
+        );
+      case EditorMediaTab.image:
+        final file = await _imagePicker.pickImage(
+          source: ImageSource.gallery,
+          requestFullMetadata: false,
+        );
+        if (file == null) {
+          return null;
+        }
+        final metadata = await _readImageMetadata(file.path);
+        return _ImportedAssetFile(
+          path: file.path,
+          name: file.name,
+          width: metadata.width,
+          height: metadata.height,
+        );
+      case EditorMediaTab.audio:
+        final result = await FilePicker.platform.pickFiles(
+          allowMultiple: false,
+          type: FileType.custom,
+          allowedExtensions: _allowedExtensionsFor(tab),
+        );
+        if (result == null || result.files.isEmpty) {
+          return null;
+        }
+        final file = result.files.single;
+        if (file.path == null) {
+          return null;
+        }
+        return _ImportedAssetFile(
+          path: file.path!,
+          name: file.name,
+        );
+      case EditorMediaTab.text:
+      case EditorMediaTab.lipSync:
+        return null;
+    }
+  }
+
+  Future<void> _addAssetToTimeline(MockAssetItem asset) async {
+    final handle = _engineController.projectHandle;
+    if (handle == null) {
+      return;
+    }
+
+    final preparedAsset = await _ensureAssetMetadata(asset);
+    final durationSeconds =
+        preparedAsset.durationSeconds ?? _defaultDurationFor(preparedAsset.tab);
+    final trackKind = _engineTrackKindFor(preparedAsset.tab);
+    final hadVisualTracks = _engineController.tracks.any(
+      (track) =>
+          (track.kind == TimelineTrackKind.video ||
+              track.kind == TimelineTrackKind.image) &&
+          track.clips.isNotEmpty,
+    );
+
+    await _engineController.insertClip(
+      trackKind: trackKind,
+      clipId: preparedAsset.id,
+      durationSeconds: durationSeconds,
+      isMedia: true,
+    );
+
+    if (preparedAsset.isVisual) {
+      if (!hadVisualTracks &&
+          preparedAsset.width != null &&
+          preparedAsset.height != null) {
+        _workspaceSize = Size(
+          preparedAsset.width!.toDouble(),
+          preparedAsset.height!.toDouble(),
+        );
+      }
+      await _activatePreviewForAsset(preparedAsset);
+    }
+
+    if (!mounted) {
+      return;
+    }
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text('${preparedAsset.label} added to timeline'),
+        duration: const Duration(milliseconds: 1000),
+      ),
+    );
+  }
+
+  EngineTrackKind _engineTrackKindFor(EditorMediaTab tab) {
+    switch (tab) {
+      case EditorMediaTab.video:
+        return EngineTrackKind.video;
+      case EditorMediaTab.image:
+        return EngineTrackKind.image;
+      case EditorMediaTab.audio:
+        return EngineTrackKind.audio;
+      case EditorMediaTab.text:
+        return EngineTrackKind.text;
+      case EditorMediaTab.lipSync:
+        return EngineTrackKind.lipSync;
+    }
+  }
+
+  double _defaultDurationFor(EditorMediaTab tab) {
+    switch (tab) {
+      case EditorMediaTab.video:
+        return 5;
+      case EditorMediaTab.image:
+        return 3;
+      case EditorMediaTab.audio:
+        return 5;
+      case EditorMediaTab.text:
+        return 3;
+      case EditorMediaTab.lipSync:
+        return 3;
+    }
+  }
+
+  List<String> _allowedExtensionsFor(EditorMediaTab tab) {
+    switch (tab) {
+      case EditorMediaTab.video:
+        return const ['mp4', 'mov', 'm4v'];
+      case EditorMediaTab.image:
+        return const ['png', 'jpg', 'jpeg', 'webp', 'heic'];
+      case EditorMediaTab.audio:
+        return const ['mp3', 'wav', 'm4a', 'aac', 'ogg'];
+      case EditorMediaTab.text:
+        return const ['txt'];
+      case EditorMediaTab.lipSync:
+        return const ['png', 'jpg', 'jpeg'];
+    }
+  }
+
+  Future<_ImportedAssetMetadata> _readVideoMetadata(String path) async {
+    final controller = VideoPlayerController.file(File(path));
+    try {
+      await controller.initialize();
+      final value = controller.value;
+      return _ImportedAssetMetadata(
+        durationSeconds:
+            value.duration.inMicroseconds / Duration.microsecondsPerSecond,
+        width: value.size.width.round(),
+        height: value.size.height.round(),
+      );
+    } finally {
+      await controller.dispose();
+    }
+  }
+
+  Future<_ImportedAssetMetadata> _readImageMetadata(String path) async {
+    final bytes = await File(path).readAsBytes();
+    final codec = await ui.instantiateImageCodec(bytes);
+    final frame = await codec.getNextFrame();
+    final metadata = _ImportedAssetMetadata(
+      width: frame.image.width,
+      height: frame.image.height,
+    );
+    frame.image.dispose();
+    codec.dispose();
+    return metadata;
+  }
+
   @override
   Widget build(BuildContext context) {
+    final currentSeconds = _effectiveCurrentSeconds;
+    final isPlaying = _effectiveIsPlaying;
+    final tracks = _engineController.tracks;
+    final selectedClipId = _engineController.selectedClipId;
+
     return Scaffold(
       body: SafeArea(
         bottom: false,
@@ -230,7 +680,10 @@ class _MobileEditorScreenState extends State<MobileEditorScreen>
                     flex: 4,
                     child: ConstrainedBox(
                       constraints: const BoxConstraints(minHeight: 220),
-                      child: const PreviewStage(),
+                      child: PreviewStage(
+                        workspaceAspectRatio: _workspaceAspectRatio,
+                        child: _buildPreviewContent(),
+                      ),
                     ),
                   ),
                   const SizedBox(height: 4),
@@ -252,8 +705,19 @@ class _MobileEditorScreenState extends State<MobileEditorScreen>
                             padding: const EdgeInsets.fromLTRB(4, 4, 4, 3),
                             child: EditorToolsBar(
                               embedded: true,
-                              isPlaying: _isPlaying,
-                              onSplit: _splitSelectedClip,
+                              isPlaying: isPlaying,
+                              onSplit: () => _syncCurrentTimeBeforeEdit(
+                                _engineController.splitSelectedClip,
+                              ),
+                              onTrimRight: () => _syncCurrentTimeBeforeEdit(
+                                _engineController.trimSelectedClipRight,
+                              ),
+                              onTrimLeft: () => _syncCurrentTimeBeforeEdit(
+                                _engineController.trimSelectedClipLeft,
+                              ),
+                              onDuplicate:
+                                  _engineController.duplicateSelectedClip,
+                              onDelete: _engineController.deleteSelectedClip,
                               onPlayToggle: _togglePlayback,
                             ),
                           ),
@@ -267,13 +731,15 @@ class _MobileEditorScreenState extends State<MobileEditorScreen>
                               padding: const EdgeInsets.fromLTRB(0, 2, 0, 0),
                               child: TimelinePanel(
                                 embedded: true,
-                                tracks: _tracks,
-                                currentSeconds: _currentSeconds,
-                                timelineDuration: _timelineDuration,
-                                isPlaying: _isPlaying,
-                                selectedClipId: _selectedClipId,
+                                tracks: tracks,
+                                currentSeconds: currentSeconds,
+                                timelineDuration: _effectiveTimelineDuration,
+                                isPlaying: isPlaying,
+                                selectedClipId: selectedClipId,
                                 onTimeChanged: _setCurrentSeconds,
-                                onClipSelected: _selectClip,
+                                onClipSelected: _handleClipSelected,
+                                onScrubStateChanged:
+                                    _handleTimelineScrubStateChanged,
                               ),
                             ),
                           ),
@@ -302,4 +768,30 @@ class _MobileEditorScreenState extends State<MobileEditorScreen>
       ),
     );
   }
+}
+
+class _ImportedAssetFile {
+  const _ImportedAssetFile({
+    required this.path,
+    required this.name,
+    this.width,
+    this.height,
+  });
+
+  final String path;
+  final String name;
+  final int? width;
+  final int? height;
+}
+
+class _ImportedAssetMetadata {
+  const _ImportedAssetMetadata({
+    this.durationSeconds,
+    this.width,
+    this.height,
+  });
+
+  final double? durationSeconds;
+  final int? width;
+  final int? height;
 }

@@ -1,6 +1,8 @@
 import 'dart:math' as math;
+import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 
 import '../../../../core/theme/app_theme.dart';
 import '../models/timeline_mock_models.dart';
@@ -16,6 +18,7 @@ class TimelinePanel extends StatefulWidget {
     required this.selectedClipId,
     required this.onTimeChanged,
     required this.onClipSelected,
+    this.onScrubStateChanged,
   });
 
   final bool embedded;
@@ -26,6 +29,7 @@ class TimelinePanel extends StatefulWidget {
   final String? selectedClipId;
   final ValueChanged<double> onTimeChanged;
   final ValueChanged<String> onClipSelected;
+  final ValueChanged<bool>? onScrubStateChanged;
 
   @override
   State<TimelinePanel> createState() => _TimelinePanelState();
@@ -38,6 +42,7 @@ class _TimelinePanelState extends State<TimelinePanel> {
   static const double _controlTileSize = 36;
   static const double _controlGap = 8;
   static const double _trailingPadding = 120;
+  static const double _timeReadoutWidth = 96;
   static const double _minSecondsWidth = 92;
   static const double _maxSecondsWidth = 260;
 
@@ -50,6 +55,10 @@ class _TimelinePanelState extends State<TimelinePanel> {
   double _scaleStartSecondsWidth = 118;
   double _scaleStartFocusTime = 0;
   bool _isSyncingFromExternal = false;
+  bool _isScrollActive = false;
+  double? _pendingSeconds;
+  Timer? _scrollDispatchTimer;
+  DateTime? _lastDispatchedAt;
 
   @override
   void initState() {
@@ -69,6 +78,7 @@ class _TimelinePanelState extends State<TimelinePanel> {
   @override
   void dispose() {
     _scrollController.removeListener(_handleScroll);
+    _scrollDispatchTimer?.cancel();
     _scrollController.dispose();
     _verticalController.dispose();
     super.dispose();
@@ -118,13 +128,38 @@ class _TimelinePanelState extends State<TimelinePanel> {
     final nextSeconds =
         (offset / _secondsWidth).clamp(0, widget.timelineDuration).toDouble();
 
-    if ((nextSeconds - widget.currentSeconds).abs() > 0.005) {
-      widget.onTimeChanged(nextSeconds);
+    if ((nextSeconds - widget.currentSeconds).abs() <= 0.002) {
+      return;
     }
+
+    final now = DateTime.now();
+    if (_lastDispatchedAt == null ||
+        now.difference(_lastDispatchedAt!) >=
+            const Duration(milliseconds: 16)) {
+      _lastDispatchedAt = now;
+      widget.onTimeChanged(nextSeconds);
+      return;
+    }
+
+    _pendingSeconds = nextSeconds;
+    _scrollDispatchTimer ??=
+        Timer(const Duration(milliseconds: 16), _flushPendingScrollSeconds);
+  }
+
+  void _flushPendingScrollSeconds() {
+    _scrollDispatchTimer?.cancel();
+    _scrollDispatchTimer = null;
+    final nextSeconds = _pendingSeconds;
+    _pendingSeconds = null;
+    if (nextSeconds == null) {
+      return;
+    }
+    _lastDispatchedAt = DateTime.now();
+    widget.onTimeChanged(nextSeconds);
   }
 
   void _syncToTime() {
-    if (!_scrollController.hasClients) {
+    if (!_scrollController.hasClients || _isScrollActive) {
       return;
     }
 
@@ -141,6 +176,24 @@ class _TimelinePanelState extends State<TimelinePanel> {
     _isSyncingFromExternal = false;
   }
 
+  bool _handleScrollNotification(ScrollNotification notification) {
+    final previousState = _isScrollActive;
+    if (notification is ScrollStartNotification ||
+        (notification is UserScrollNotification &&
+            notification.direction != ScrollDirection.idle)) {
+      _isScrollActive = true;
+    } else if (notification is ScrollEndNotification ||
+        (notification is UserScrollNotification &&
+            notification.direction == ScrollDirection.idle)) {
+      _isScrollActive = false;
+      _flushPendingScrollSeconds();
+    }
+    if (previousState != _isScrollActive) {
+      widget.onScrubStateChanged?.call(_isScrollActive);
+    }
+    return false;
+  }
+
   String _formatClock(double value) {
     final totalMillis =
         (value.clamp(0, widget.timelineDuration) * 1000).round();
@@ -154,7 +207,7 @@ class _TimelinePanelState extends State<TimelinePanel> {
     return '00:$seconds';
   }
 
-  double _buildContentWidth() {
+  double _buildContentWidth(double trailingPadding) {
     final farthest = widget.tracks.fold<double>(
       0,
       (maxWidth, track) {
@@ -170,7 +223,7 @@ class _TimelinePanelState extends State<TimelinePanel> {
         _controlTileSize +
         _controlGap +
         farthest +
-        _trailingPadding;
+        trailingPadding;
   }
 
   @override
@@ -183,7 +236,11 @@ class _TimelinePanelState extends State<TimelinePanel> {
           6,
           _playheadLeft - _controlTileSize - _controlGap,
         );
-        final contentWidth = _buildContentWidth();
+        final trailingPadding = math.max(
+          _trailingPadding,
+          contentViewportWidth - _playheadLeft + 24,
+        );
+        final contentWidth = _buildContentWidth(trailingPadding);
 
         return Container(
           padding: const EdgeInsets.fromLTRB(
@@ -205,14 +262,15 @@ class _TimelinePanelState extends State<TimelinePanel> {
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
                   SizedBox(
-                    height: 18,
-                    child: Stack(
+                    height: 20,
+                    child: Row(
                       children: [
-                        Positioned(
-                          left: 0,
-                          top: 0,
+                        SizedBox(
+                          width: _timeReadoutWidth,
                           child: Text(
                             '${_formatClock(widget.currentSeconds)} / ${_formatWholeSeconds(widget.timelineDuration)}',
+                            maxLines: 1,
+                            overflow: TextOverflow.clip,
                             style: const TextStyle(
                               color: FxPalette.textPrimary,
                               fontSize: 10,
@@ -221,25 +279,26 @@ class _TimelinePanelState extends State<TimelinePanel> {
                             ),
                           ),
                         ),
-                        Positioned.fill(
-                          left: _leadingOffset,
+                        const SizedBox(width: 6),
+                        Expanded(
                           child: IgnorePointer(
-                            child: Row(
-                              children: List.generate(
-                                widget.timelineDuration.floor() + 1,
-                                (index) => Expanded(
-                                  child: Align(
-                                    alignment: Alignment.topLeft,
-                                    child: Text(
-                                      _formatWholeSeconds(index.toDouble()),
-                                      style: TextStyle(
-                                        color: Colors.white.withOpacity(0.58),
-                                        fontSize: 9,
-                                        fontWeight: FontWeight.w500,
-                                      ),
-                                    ),
-                                  ),
+                            child: CustomPaint(
+                              painter: _TimelineRulerPainter(
+                                scrollOffset: _scrollController.hasClients
+                                    ? _scrollController.offset
+                                    : 0,
+                                playheadLeft: math.max(
+                                    0, _playheadLeft - _timeReadoutWidth - 6),
+                                viewportWidth: math.max(
+                                  0,
+                                  constraints.maxWidth -
+                                      (_panelPadding * 2) -
+                                      _timeReadoutWidth -
+                                      6,
                                 ),
+                                secondsWidth: _secondsWidth,
+                                durationSeconds: widget.timelineDuration,
+                                fps: 30,
                               ),
                             ),
                           ),
@@ -249,40 +308,45 @@ class _TimelinePanelState extends State<TimelinePanel> {
                   ),
                   const SizedBox(height: 8),
                   Expanded(
-                    child: GestureDetector(
-                      behavior: HitTestBehavior.opaque,
-                      onScaleStart: _handleScaleStart,
-                      onScaleUpdate: _handleScaleUpdate,
-                      child: ClipRRect(
-                        borderRadius: BorderRadius.circular(8),
-                        child: SingleChildScrollView(
-                          controller: _scrollController,
-                          scrollDirection: Axis.horizontal,
-                          physics: const ClampingScrollPhysics(),
-                          child: SizedBox(
-                            width: contentWidth,
-                            child: SingleChildScrollView(
-                              controller: _verticalController,
-                              physics: const ClampingScrollPhysics(),
-                              child: Column(
-                                children: [
-                                  for (var i = 0;
-                                      i < widget.tracks.length;
-                                      i++) ...[
-                                    _TimelineTrackRow(
-                                      leadingOffset: _leadingOffset,
-                                      controlTileSize: _controlTileSize,
-                                      controlGap: _controlGap,
-                                      rowHeight: _rowHeight,
-                                      secondsWidth: _secondsWidth,
-                                      track: widget.tracks[i],
-                                      selectedClipId: widget.selectedClipId,
-                                      onClipSelected: widget.onClipSelected,
-                                    ),
-                                    if (i != widget.tracks.length - 1)
-                                      const SizedBox(height: _rowGap),
+                    child: NotificationListener<ScrollNotification>(
+                      onNotification: _handleScrollNotification,
+                      child: GestureDetector(
+                        behavior: HitTestBehavior.opaque,
+                        onScaleStart: _handleScaleStart,
+                        onScaleUpdate: _handleScaleUpdate,
+                        child: ClipRRect(
+                          borderRadius: BorderRadius.circular(8),
+                          child: SingleChildScrollView(
+                            controller: _scrollController,
+                            scrollDirection: Axis.horizontal,
+                            physics: const ClampingScrollPhysics(
+                              parent: AlwaysScrollableScrollPhysics(),
+                            ),
+                            child: SizedBox(
+                              width: contentWidth,
+                              child: SingleChildScrollView(
+                                controller: _verticalController,
+                                physics: const ClampingScrollPhysics(),
+                                child: Column(
+                                  children: [
+                                    for (var i = 0;
+                                        i < widget.tracks.length;
+                                        i++) ...[
+                                      _TimelineTrackRow(
+                                        leadingOffset: _leadingOffset,
+                                        controlTileSize: _controlTileSize,
+                                        controlGap: _controlGap,
+                                        rowHeight: _rowHeight,
+                                        secondsWidth: _secondsWidth,
+                                        track: widget.tracks[i],
+                                        selectedClipId: widget.selectedClipId,
+                                        onClipSelected: widget.onClipSelected,
+                                      ),
+                                      if (i != widget.tracks.length - 1)
+                                        const SizedBox(height: _rowGap),
+                                    ],
                                   ],
-                                ],
+                                ),
                               ),
                             ),
                           ),
@@ -590,5 +654,138 @@ class _TransitionBridge extends StatelessWidget {
         ),
       ),
     );
+  }
+}
+
+class _TimelineRulerPainter extends CustomPainter {
+  const _TimelineRulerPainter({
+    required this.scrollOffset,
+    required this.playheadLeft,
+    required this.viewportWidth,
+    required this.secondsWidth,
+    required this.durationSeconds,
+    required this.fps,
+  });
+
+  final double scrollOffset;
+  final double playheadLeft;
+  final double viewportWidth;
+  final double secondsWidth;
+  final double durationSeconds;
+  final double fps;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final tickPaint = Paint()
+      ..color = Colors.white.withOpacity(0.18)
+      ..strokeWidth = 1;
+    final majorTickPaint = Paint()
+      ..color = Colors.white.withOpacity(0.34)
+      ..strokeWidth = 1.1;
+
+    final textStyle = TextStyle(
+      color: Colors.white.withOpacity(0.62),
+      fontSize: 9,
+      fontWeight: FontWeight.w500,
+    );
+
+    final minorStep = _pickStep(14);
+    final majorStep = _pickStep(34);
+    final labelStep = _pickStep(68);
+    final visibleStart =
+        math.max(0, (scrollOffset - playheadLeft - 24) / secondsWidth);
+    final visibleEnd = math.min(
+        durationSeconds, (scrollOffset + viewportWidth) / secondsWidth);
+    final firstTick = (visibleStart / minorStep).floor() * minorStep;
+    var lastLabelRight = -1000.0;
+
+    for (double time = firstTick;
+        time <= visibleEnd + minorStep;
+        time += minorStep) {
+      final x = playheadLeft + time * secondsWidth - scrollOffset;
+      if (x < 0 || x > size.width) {
+        continue;
+      }
+
+      final isMajor = _isMultipleOf(time, majorStep);
+      final tickHeight = isMajor ? 11.0 : 6.0;
+      canvas.drawLine(
+        Offset(x, size.height - tickHeight),
+        Offset(x, size.height),
+        isMajor ? majorTickPaint : tickPaint,
+      );
+
+      if (_isMultipleOf(time, labelStep)) {
+        final textPainter = TextPainter(
+          text: TextSpan(
+            text: _formatLabel(time, labelStep),
+            style: textStyle,
+          ),
+          textDirection: TextDirection.ltr,
+        )..layout();
+        final labelX = (x + 4)
+            .clamp(0.0, math.max(0.0, size.width - textPainter.width))
+            .toDouble();
+        if (labelX <= lastLabelRight + 8) {
+          continue;
+        }
+        textPainter.paint(canvas, Offset(labelX, 0));
+        lastLabelRight = labelX + textPainter.width;
+      }
+    }
+  }
+
+  double _pickStep(double minPixels) {
+    final candidates = <double>[
+      1 / fps,
+      2 / fps,
+      5 / fps,
+      10 / fps,
+      0.5,
+      1,
+      2,
+      5,
+      10,
+      15,
+      30,
+      60,
+    ];
+    for (final step in candidates) {
+      if (step * secondsWidth >= minPixels) {
+        return step;
+      }
+    }
+    return candidates.last;
+  }
+
+  bool _isMultipleOf(double value, double step) {
+    if (step <= 0) {
+      return false;
+    }
+    final ratio = value / step;
+    return (ratio - ratio.round()).abs() < 0.001;
+  }
+
+  String _formatLabel(double seconds, double labelStep) {
+    final totalFrames = (seconds * fps).round();
+    final fpsInt = fps.round();
+    final wholeSeconds = totalFrames ~/ fpsInt;
+    final mins = wholeSeconds ~/ 60;
+    final secs = wholeSeconds % 60;
+    if (labelStep >= 1) {
+      return '${mins.toString().padLeft(2, '0')}:${secs.toString().padLeft(2, '0')}';
+    }
+    final frames = totalFrames % fpsInt;
+    return '${mins.toString().padLeft(2, '0')}:${secs.toString().padLeft(2, '0')}.${frames.toString().padLeft(2, '0')}';
+  }
+
+  @override
+  bool shouldRepaint(covariant _TimelineRulerPainter oldDelegate) {
+    return oldDelegate.scrollOffset != scrollOffset ||
+        oldDelegate.playheadLeft != playheadLeft ||
+        oldDelegate.viewportWidth != viewportWidth ||
+        oldDelegate.secondsWidth != secondsWidth ||
+        oldDelegate.durationSeconds != durationSeconds ||
+        oldDelegate.fps != fps;
   }
 }
