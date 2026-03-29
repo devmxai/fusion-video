@@ -82,6 +82,48 @@ Current practical status:
 - the next execution priority is closing the new contract/preview phases on both platforms
 - no advanced media feature should be treated as complete until it passes on iOS and Android together
 
+### Current Engineering Focus
+
+The project is now officially in:
+
+- `Execution Stabilization Phase`
+
+This means the current priority is not:
+
+- transitions
+- effects
+- UI polish
+- feature expansion
+
+The current priority is:
+
+- playback smoothness
+- preview stability
+- audio correctness
+- scheduling correctness
+- seam-safe handoff
+
+Observed critical issues that justify this focus:
+
+- visible playback hitching and stops
+- unstable preview continuity
+- scrub/seek delay or incorrectness in some cases
+- intermittent audio loss or stutter
+- black frames or seam glitches in some scenarios
+
+The current diagnosis is:
+
+- architecture and wiring have improved
+- execution quality is still not at production level
+
+For this reason, the project must move from:
+
+- prototype engine
+
+To:
+
+- real-time playback engine
+
 ## What Has Been Built
 
 ### Mobile Editor UI
@@ -277,6 +319,19 @@ runtime diagnostics surface that shows:
 
 The goal is to make `5s clamp`, `scrub lag`, and preview desync measurable
 instead of inferred.
+
+Latest stabilization checkpoint now also adds native runtime metrics plumbing on
+iOS and Android for:
+
+- preview latency
+- seek latency
+- frame drop counting
+- audio drop counting
+- buffer underrun counting
+
+These metrics now flow through the preview runtime event path into Flutter
+diagnostics so playback instability can be measured during real preview
+execution, not only described qualitatively.
 
 ## Known Open Issues
 

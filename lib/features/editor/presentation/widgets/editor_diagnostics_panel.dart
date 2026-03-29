@@ -53,12 +53,22 @@ class EditorDiagnosticsPanel extends StatelessWidget {
               _MetricLine(
                 label: 'State',
                 value:
-                    '${diagnostics.enginePlaybackState.name} | preview ${diagnostics.previewIsReady ? (diagnostics.previewIsPlaying ? 'playing' : 'paused') : 'idle'}',
+                    '${diagnostics.enginePlaybackState.name} | preview ${diagnostics.previewIsReady ? (diagnostics.previewIsPlaying ? 'playing' : 'paused') : 'idle'}${diagnostics.previewIsBuffering ? ' | buffering' : ''}${diagnostics.previewFrameReady ? ' | frame ready' : ''}',
               ),
               _MetricLine(
                 label: 'Source',
                 value:
                     '${diagnostics.previewSourceKind ?? 'none'}:${diagnostics.previewSourceId ?? 'none'}',
+              ),
+              _MetricLine(
+                label: 'Latency',
+                value:
+                    '${diagnostics.previewLatencyMillis.toStringAsFixed(0)}ms preview | ${diagnostics.seekLatencyMillis.toStringAsFixed(0)}ms seek',
+              ),
+              _MetricLine(
+                label: 'Drops',
+                value:
+                    '${diagnostics.frameDropCount} frame | ${diagnostics.audioDropCount} audio | ${diagnostics.bufferUnderrunCount} underrun',
               ),
             ],
           ),

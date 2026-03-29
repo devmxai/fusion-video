@@ -159,6 +159,13 @@ class FusionPreviewSessionBridge {
         transportRevision: (map['transportRevision'] as num?)?.toInt() ?? 0,
         isBuffering: map['isBuffering'] as bool? ?? false,
         frameReady: map['frameReady'] as bool? ?? false,
+        frameDropCount: (map['frameDropCount'] as num?)?.toInt() ?? 0,
+        audioDropCount: (map['audioDropCount'] as num?)?.toInt() ?? 0,
+        bufferUnderrunCount:
+            (map['bufferUnderrunCount'] as num?)?.toInt() ?? 0,
+        previewLatencyMillis:
+            (map['previewLatencyMillis'] as num?)?.toDouble() ?? 0,
+        seekLatencyMillis: (map['seekLatencyMillis'] as num?)?.toDouble() ?? 0,
       );
     });
   }

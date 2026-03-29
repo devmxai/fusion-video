@@ -6,10 +6,17 @@ class EditorRuntimeDiagnostics {
     required this.enginePlaybackState,
     required this.previewIsReady,
     required this.previewIsPlaying,
+    required this.previewIsBuffering,
+    required this.previewFrameReady,
     required this.enginePositionSeconds,
     required this.engineDurationSeconds,
     required this.previewPositionSeconds,
     required this.previewDurationSeconds,
+    required this.frameDropCount,
+    required this.audioDropCount,
+    required this.bufferUnderrunCount,
+    required this.previewLatencyMillis,
+    required this.seekLatencyMillis,
     required this.selectedClipId,
     required this.previewSourceId,
     required this.previewSourceKind,
@@ -21,10 +28,17 @@ class EditorRuntimeDiagnostics {
   final EnginePlaybackState enginePlaybackState;
   final bool previewIsReady;
   final bool previewIsPlaying;
+  final bool previewIsBuffering;
+  final bool previewFrameReady;
   final double enginePositionSeconds;
   final double engineDurationSeconds;
   final double previewPositionSeconds;
   final double previewDurationSeconds;
+  final int frameDropCount;
+  final int audioDropCount;
+  final int bufferUnderrunCount;
+  final double previewLatencyMillis;
+  final double seekLatencyMillis;
   final String? selectedClipId;
   final String? previewSourceId;
   final String? previewSourceKind;
@@ -88,14 +102,55 @@ class EditorRuntimeDiagnostics {
       warnings.add('Audio node bounds are invalid for the current playhead.');
     }
 
+    if (previewState.isBuffering) {
+      warnings.add('Preview backend reports buffering during active editor flow.');
+    }
+
+    if (previewState.frameDropCount > 0) {
+      warnings.add(
+        'Preview runtime has reported ${previewState.frameDropCount} dropped frame(s).',
+      );
+    }
+
+    if (previewState.bufferUnderrunCount > 0) {
+      warnings.add(
+        'Preview runtime has reported ${previewState.bufferUnderrunCount} buffer underrun(s).',
+      );
+    }
+
+    if (previewState.audioDropCount > 0) {
+      warnings.add(
+        'Preview runtime has reported ${previewState.audioDropCount} audio drop(s).',
+      );
+    }
+
+    if (previewState.seekLatencyMillis >= 120) {
+      warnings.add(
+        'Preview seek latency is elevated at ${previewState.seekLatencyMillis.toStringAsFixed(0)}ms.',
+      );
+    }
+
+    if (previewState.previewLatencyMillis >= 80) {
+      warnings.add(
+        'Preview frame latency is elevated at ${previewState.previewLatencyMillis.toStringAsFixed(0)}ms.',
+      );
+    }
+
     return EditorRuntimeDiagnostics(
       enginePlaybackState: engineStatus.playbackState,
       previewIsReady: previewState.isReady,
       previewIsPlaying: previewState.isPlaying,
+      previewIsBuffering: previewState.isBuffering,
+      previewFrameReady: previewState.isFrameReady,
       enginePositionSeconds: engineStatus.position.seconds,
       engineDurationSeconds: engineDurationSeconds,
       previewPositionSeconds: previewState.positionSeconds,
       previewDurationSeconds: previewState.durationSeconds,
+      frameDropCount: previewState.frameDropCount,
+      audioDropCount: previewState.audioDropCount,
+      bufferUnderrunCount: previewState.bufferUnderrunCount,
+      previewLatencyMillis: previewState.previewLatencyMillis,
+      seekLatencyMillis: previewState.seekLatencyMillis,
       selectedClipId: selectedClipId,
       previewSourceId: previewSource?.id,
       previewSourceKind: previewSource?.kind.name,

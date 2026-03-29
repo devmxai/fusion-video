@@ -27,6 +27,36 @@ It will not use:
 - long-term `MediaPlayer` / `TextureView` dependency
 - Flutter-owned preview or playback logic
 
+## Current Program Directive
+
+Fusion Video is now in:
+
+- `Execution Stabilization Phase`
+
+This means:
+
+- no feature expansion priority
+- no UI polish priority
+- no transitions/effects priority
+
+Current engineering focus is exclusively on:
+
+- preview stability
+- audio correctness
+- transport/scheduling correctness
+- seam-safe playback
+- real-time playback behavior on iOS and Android
+
+The engine must move from:
+
+- prototype engine
+
+To:
+
+- real-time playback engine
+
+No advanced media feature should be considered for active delivery until playback and audio are stable.
+
 ## Architectural Principles
 
 ### 1. One Engine, Two Adapters
@@ -64,6 +94,26 @@ Rust owns:
 
 Rust must not be reduced to a simple timeline helper.
 It is the editor transport authority.
+
+### 2.1 Rust Transport Clock Is Authoritative
+
+There must be one authoritative runtime clock:
+
+- Rust transport clock
+
+The following must derive from that clock:
+
+- video frame resolution
+- audio scheduling
+- preview state
+- seam handoff timing
+- scrub/seek/pause frame behavior
+
+The system must not allow:
+
+- video clock drift separate from timeline clock
+- audio clock drift separate from timeline clock
+- player-native default time to override clip-local resolved time
 
 ### 3. Flutter Is UI Only
 
@@ -108,6 +158,8 @@ Not:
 - generic player-session behavior
 
 The current `TextureView + MediaPlayer` path may stay only as fallback until the new path closes Phase 2.
+
+No new long-term playback capability should be added to that path beyond what is needed to preserve fallback behavior during migration.
 
 ### 5. iOS And Android Move Together
 
@@ -206,6 +258,9 @@ Owns:
 - clip-local playback mapping
 - preview transport state
 - frame request planning
+- preroll planning
+- next-clip preload planning
+- frame buffer policy
 - seam-safe scheduling intent
 - preview payload generation
 
@@ -226,6 +281,7 @@ Owns:
 Owns:
 
 - audio decode planning
+- audio buffer policy
 - mixer planning
 - gain
 - mute
@@ -303,6 +359,7 @@ If two adjacent clips come from the same source and are source-contiguous:
 - do not treat the seam as a hard source switch
 - do not reattach unnecessarily
 - do not reseek to asset time zero
+- do not reset decoder state unless continuity is actually broken
 - keep attachment stable where possible
 
 ### Same-Source Non-Contiguous
@@ -318,6 +375,7 @@ If the same source is reused but offsets are not contiguous:
 If the next clip is a different source:
 
 - preload next visual source before seam
+- preroll before seam becomes visible
 - prepare the handoff before the current clip ends
 - avoid black flash and attachment churn
 
@@ -361,6 +419,7 @@ We migrate capability by capability behind stable contracts.
 - no merge for media features without dual-platform validation
 - current preview path remains temporary fallback only
 - engine parity and preview stability are higher priority than new UI features
+- feature expansion is paused while execution stabilization remains open
 
 ### Anti-Patterns To Avoid
 
@@ -369,6 +428,19 @@ We migrate capability by capability behind stable contracts.
 - player defaults overriding clip-local time
 - iOS behavior shipped first with Android deferred
 - UI-only workarounds for preview/audio defects
+- treating playback hitching as acceptable while adding new features
+
+## Stabilization Priorities
+
+The immediate execution priorities are:
+
+1. deterministic preview pipeline
+2. preroll + buffering around playhead
+3. seam-safe handoff behavior
+4. real audio engine path
+5. authoritative clock unification
+6. Android execution-layer migration beyond generic player behavior
+7. diagnostics converted into measurable runtime metrics
 
 ## Success Criteria
 

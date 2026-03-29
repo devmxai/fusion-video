@@ -202,6 +202,11 @@ class PreviewRuntimeEvent {
     required this.transportRevision,
     this.isBuffering = false,
     this.frameReady = false,
+    this.frameDropCount = 0,
+    this.audioDropCount = 0,
+    this.bufferUnderrunCount = 0,
+    this.previewLatencyMillis = 0,
+    this.seekLatencyMillis = 0,
   });
 
   final int projectId;
@@ -210,6 +215,11 @@ class PreviewRuntimeEvent {
   final int transportRevision;
   final bool isBuffering;
   final bool frameReady;
+  final int frameDropCount;
+  final int audioDropCount;
+  final int bufferUnderrunCount;
+  final double previewLatencyMillis;
+  final double seekLatencyMillis;
 }
 
 class ResolvedPreviewPayload {
@@ -306,6 +316,11 @@ class PreviewBackendState {
     this.isPlaying = false,
     this.isBuffering = false,
     this.isFrameReady = false,
+    this.frameDropCount = 0,
+    this.audioDropCount = 0,
+    this.bufferUnderrunCount = 0,
+    this.previewLatencyMillis = 0,
+    this.seekLatencyMillis = 0,
     this.transportRevision = 0,
     this.positionSeconds = 0,
     this.durationSeconds = 0,
@@ -327,6 +342,11 @@ class PreviewBackendState {
   final bool isPlaying;
   final bool isBuffering;
   final bool isFrameReady;
+  final int frameDropCount;
+  final int audioDropCount;
+  final int bufferUnderrunCount;
+  final double previewLatencyMillis;
+  final double seekLatencyMillis;
   final int transportRevision;
   final double positionSeconds;
   final double durationSeconds;
@@ -360,6 +380,11 @@ class PreviewBackendState {
     bool? isPlaying,
     bool? isBuffering,
     bool? isFrameReady,
+    int? frameDropCount,
+    int? audioDropCount,
+    int? bufferUnderrunCount,
+    double? previewLatencyMillis,
+    double? seekLatencyMillis,
     int? transportRevision,
     double? positionSeconds,
     double? durationSeconds,
@@ -386,6 +411,12 @@ class PreviewBackendState {
       isPlaying: isPlaying ?? this.isPlaying,
       isBuffering: isBuffering ?? this.isBuffering,
       isFrameReady: isFrameReady ?? this.isFrameReady,
+      frameDropCount: frameDropCount ?? this.frameDropCount,
+      audioDropCount: audioDropCount ?? this.audioDropCount,
+      bufferUnderrunCount: bufferUnderrunCount ?? this.bufferUnderrunCount,
+      previewLatencyMillis:
+          previewLatencyMillis ?? this.previewLatencyMillis,
+      seekLatencyMillis: seekLatencyMillis ?? this.seekLatencyMillis,
       transportRevision: transportRevision ?? this.transportRevision,
       positionSeconds: positionSeconds ?? this.positionSeconds,
       durationSeconds: durationSeconds ?? this.durationSeconds,

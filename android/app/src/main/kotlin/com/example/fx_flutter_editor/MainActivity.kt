@@ -14,6 +14,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.Surface
@@ -449,6 +450,7 @@ private object FusionMediaThumbnailGenerator {
 private object FusionPreviewRegistry {
     private val views = mutableMapOf<Int, MutableList<FusionPreviewNativeView>>()
     private val payloads = mutableMapOf<Int, FusionPreviewPayload>()
+    private val runtimeStates = mutableMapOf<Int, FusionPreviewRuntimeState>()
     private var eventSink: EventChannel.EventSink? = null
 
     fun attach(projectId: Int, view: FusionPreviewNativeView) {
@@ -483,6 +485,10 @@ private object FusionPreviewRegistry {
 
     fun detach(projectId: Int, view: FusionPreviewNativeView) {
         views[projectId]?.remove(view)
+        if (views[projectId].isNullOrEmpty()) {
+            views.remove(projectId)
+            runtimeStates.remove(projectId)
+        }
     }
 
     fun update(
@@ -634,18 +640,32 @@ private object FusionPreviewRegistry {
         }
     }
 
+    fun reportRuntimeState(projectId: Int, state: FusionPreviewRuntimeState) {
+        runtimeStates[projectId] = state
+        payloads[projectId]?.let { emitRuntimeEvent(projectId, it) }
+    }
+
     private fun emitRuntimeEvent(
         projectId: Int,
         payload: FusionPreviewPayload,
         sink: EventChannel.EventSink? = null,
     ) {
+        val runtimeState = runtimeStates[projectId]
         val event = mapOf(
             "projectId" to projectId,
-            "positionSeconds" to payload.positionSeconds,
-            "isPlaying" to payload.isPlaying,
-            "transportRevision" to payload.transportRevision,
-            "isBuffering" to false,
-            "frameReady" to (payload.sourceId != null || payload.sourcePath != null),
+            "positionSeconds" to (runtimeState?.positionSeconds ?: payload.positionSeconds),
+            "isPlaying" to (runtimeState?.isPlaying ?: payload.isPlaying),
+            "transportRevision" to (runtimeState?.transportRevision ?: payload.transportRevision),
+            "isBuffering" to (runtimeState?.isBuffering ?: false),
+            "frameReady" to (
+                runtimeState?.frameReady
+                    ?: (payload.sourceId != null || payload.sourcePath != null)
+                ),
+            "frameDropCount" to (runtimeState?.frameDropCount ?: 0),
+            "audioDropCount" to (runtimeState?.audioDropCount ?: 0),
+            "bufferUnderrunCount" to (runtimeState?.bufferUnderrunCount ?: 0),
+            "previewLatencyMillis" to (runtimeState?.previewLatencyMillis ?: 0.0),
+            "seekLatencyMillis" to (runtimeState?.seekLatencyMillis ?: 0.0),
         )
         if (sink != null) {
             sink.success(event)
@@ -693,6 +713,19 @@ private data class FusionPreviewPayload(
     val sceneNodes: List<Map<String, Any?>>,
     val positionSeconds: Double,
     val isPlaying: Boolean,
+)
+
+private data class FusionPreviewRuntimeState(
+    val positionSeconds: Double,
+    val isPlaying: Boolean,
+    val transportRevision: Int,
+    val isBuffering: Boolean,
+    val frameReady: Boolean,
+    val frameDropCount: Int,
+    val audioDropCount: Int,
+    val bufferUnderrunCount: Int,
+    val previewLatencyMillis: Double,
+    val seekLatencyMillis: Double,
 )
 
 private class FusionPreviewViewFactory : PlatformViewFactory(StandardMessageCodec.INSTANCE) {
@@ -758,6 +791,18 @@ private class FusionPreviewNativeView(
     private var pendingSeekTargetMs: Int? = null
     private var pendingPlayAfterSeek: Boolean = false
     private var pendingSeekRetryCount: Int = 0
+    private var pendingSeekStartedRealtimeMs: Long? = null
+    private var lastTransportMutationRealtimeMs: Long = 0L
+    private var lastRuntimeEmitRealtimeMs: Long = 0L
+    private var lastFrameRealtimeMs: Long = 0L
+    private var runtimeIsBuffering: Boolean = false
+    private var runtimeFrameReady: Boolean = false
+    private var runtimeFrameDropCount: Int = 0
+    private var runtimeAudioDropCount: Int = 0
+    private var runtimeBufferUnderrunCount: Int = 0
+    private var runtimePreviewLatencyMillis: Double = 0.0
+    private var runtimeSeekLatencyMillis: Double = 0.0
+    private var awaitingPreviewFrame: Boolean = false
     private val boundaryRunnable = object : Runnable {
         override fun run() {
             removeCallbacks(this)
@@ -889,6 +934,9 @@ private class FusionPreviewNativeView(
         currentSceneNodes = sceneNodes
         currentPositionSeconds = positionSeconds
         isCurrentlyPlaying = isPlaying
+        if (sourceChanged || transportChanged || playStateChanged) {
+            noteTransportMutation(expectFrame = currentSourceKind == "video")
+        }
         if (sourceChanged) {
             loadSource()
         }
@@ -904,6 +952,7 @@ private class FusionPreviewNativeView(
         applyTransport(
             shouldRetarget = sourceChanged || transportChanged,
         )
+        reportRuntimeState(force = true)
     }
 
     fun dispose() {
@@ -921,6 +970,7 @@ private class FusionPreviewNativeView(
                 imageView.setImageDrawable(null)
                 imageView.visibility = View.GONE
                 textureView.visibility = View.VISIBLE
+                runtimeFrameReady = false
                 prepareVideoPlayer()
             }
 
@@ -928,10 +978,14 @@ private class FusionPreviewNativeView(
                 releasePlayer()
                 textureView.visibility = View.GONE
                 imageView.visibility = View.VISIBLE
-                imageView.setImageBitmap(
+                val bitmap =
                     takePreloadedImageIfMatching()
-                        ?: currentSourcePath?.let { BitmapFactory.decodeFile(it) },
-                )
+                        ?: currentSourcePath?.let { BitmapFactory.decodeFile(it) }
+                imageView.setImageBitmap(bitmap)
+                runtimeFrameReady = bitmap != null
+                awaitingPreviewFrame = false
+                runtimeIsBuffering = false
+                reportRuntimeState(force = true)
             }
 
             else -> {
@@ -940,6 +994,10 @@ private class FusionPreviewNativeView(
                 imageView.setImageDrawable(null)
                 imageView.visibility = View.GONE
                 releasePreloadedSource()
+                runtimeFrameReady = false
+                awaitingPreviewFrame = false
+                runtimeIsBuffering = false
+                reportRuntimeState(force = true)
             }
         }
     }
@@ -947,9 +1005,15 @@ private class FusionPreviewNativeView(
     private fun prepareVideoPlayer() {
         val path = currentSourcePath ?: run {
             releasePlayer()
+            runtimeFrameReady = false
+            reportRuntimeState(force = true)
             return
         }
-        val previewSurface = surface ?: return
+        val previewSurface = surface ?: run {
+            runtimeFrameReady = false
+            reportRuntimeState(force = true)
+            return
+        }
         val nextPlayer = takePreloadedPlayerIfMatching()
         releasePlayer()
         isPrepared = false
@@ -966,12 +1030,15 @@ private class FusionPreviewNativeView(
             if (isPrepared) {
                 applyTransport(shouldRetarget = true)
             }
+            reportRuntimeState(force = true)
             return
         }
 
         mediaPlayer = buildVideoPlayer(path, previewSurface) {
             isPrepared = true
+            runtimeIsBuffering = false
             applyTransport(shouldRetarget = true)
+            reportRuntimeState(force = true)
         }
     }
 
@@ -1005,6 +1072,24 @@ private class FusionPreviewNativeView(
     ) {
         player ?: return
         player.setOnPreparedListener { onPrepared?.invoke() }
+        player.setOnInfoListener { mp, what, _ ->
+            if (mp !== mediaPlayer) {
+                return@setOnInfoListener false
+            }
+            when (what) {
+                MediaPlayer.MEDIA_INFO_BUFFERING_START -> {
+                    runtimeIsBuffering = true
+                    runtimeBufferUnderrunCount += 1
+                    reportRuntimeState(force = true)
+                }
+
+                MediaPlayer.MEDIA_INFO_BUFFERING_END -> {
+                    runtimeIsBuffering = false
+                    reportRuntimeState(force = true)
+                }
+            }
+            false
+        }
         player.setOnSeekCompleteListener {
             if (it !== mediaPlayer) {
                 return@setOnSeekCompleteListener
@@ -1015,6 +1100,7 @@ private class FusionPreviewNativeView(
 
     private fun clearPlayerListeners(player: MediaPlayer?) {
         player?.setOnPreparedListener(null)
+        player?.setOnInfoListener(null)
         player?.setOnSeekCompleteListener(null)
     }
 
@@ -1039,9 +1125,15 @@ private class FusionPreviewNativeView(
             performPlayerSeek(player, targetMs)
             return
         }
+        pendingSeekStartedRealtimeMs?.let {
+            runtimeSeekLatencyMillis = (SystemClock.elapsedRealtime() - it).toDouble()
+        }
+        pendingSeekStartedRealtimeMs = null
+        runtimeIsBuffering = false
         pendingSeekRetryCount = 0
         pendingSeekTargetMs = null
         applyDesiredPlaybackState(player)
+        reportRuntimeState(force = true)
     }
 
     private fun performPlayerSeek(player: MediaPlayer, targetMs: Int) {
@@ -1060,10 +1152,13 @@ private class FusionPreviewNativeView(
         pendingSeekTargetMs = targetMs
         pendingPlayAfterSeek = startAfterSeek
         pendingSeekRetryCount = 0
+        pendingSeekStartedRealtimeMs = SystemClock.elapsedRealtime()
+        runtimeIsBuffering = true
         if (player.isPlaying) {
             player.pause()
         }
         performPlayerSeek(player, targetMs)
+        reportRuntimeState(force = true)
     }
 
     private fun applyDesiredPlaybackState(player: MediaPlayer) {
@@ -1074,11 +1169,13 @@ private class FusionPreviewNativeView(
             if (!player.isPlaying) {
                 player.start()
             }
+            reportRuntimeState(force = true)
             return
         }
         if (player.isPlaying) {
             player.pause()
         }
+        reportRuntimeState(force = true)
     }
 
     private fun prepareUpcomingSource() {
@@ -1390,6 +1487,57 @@ private class FusionPreviewNativeView(
         }
     }
 
+    private fun noteTransportMutation(expectFrame: Boolean) {
+        lastTransportMutationRealtimeMs = SystemClock.elapsedRealtime()
+        awaitingPreviewFrame = expectFrame
+        if (expectFrame) {
+            runtimeFrameReady = false
+        } else {
+            runtimeFrameReady =
+                currentSourceKind == "image" && !currentSourcePath.isNullOrBlank()
+            runtimePreviewLatencyMillis = 0.0
+        }
+    }
+
+    private fun currentProjectPlaybackSeconds(): Double {
+        if (currentSourceKind != "video") {
+            return currentPositionSeconds.coerceAtLeast(0.0)
+        }
+
+        val rawSourcePositionSeconds = when {
+            pendingSeekTargetMs != null -> pendingSeekTargetMs!!.toDouble() / 1000.0
+            mediaPlayer != null -> mediaPlayer!!.currentPosition.coerceAtLeast(0).toDouble() / 1000.0
+            else -> currentSourceStartSeconds
+        }
+        val relativeToClip = (rawSourcePositionSeconds - currentSourceStartSeconds).coerceAtLeast(0.0)
+        val projectPosition = currentClipStartSeconds + relativeToClip
+        return currentClipEndSeconds?.let { projectPosition.coerceIn(currentClipStartSeconds, it) }
+            ?: projectPosition.coerceAtLeast(0.0)
+    }
+
+    private fun reportRuntimeState(force: Boolean = false) {
+        val now = SystemClock.elapsedRealtime()
+        if (!force && now - lastRuntimeEmitRealtimeMs < 33L) {
+            return
+        }
+        lastRuntimeEmitRealtimeMs = now
+        FusionPreviewRegistry.reportRuntimeState(
+            projectId = projectId,
+            state = FusionPreviewRuntimeState(
+                positionSeconds = currentProjectPlaybackSeconds(),
+                isPlaying = isCurrentlyPlaying,
+                transportRevision = lastAppliedTransportRevision.coerceAtLeast(0),
+                isBuffering = runtimeIsBuffering,
+                frameReady = runtimeFrameReady,
+                frameDropCount = runtimeFrameDropCount,
+                audioDropCount = runtimeAudioDropCount,
+                bufferUnderrunCount = runtimeBufferUnderrunCount,
+                previewLatencyMillis = runtimePreviewLatencyMillis,
+                seekLatencyMillis = runtimeSeekLatencyMillis,
+            ),
+        )
+    }
+
     private fun applyTransport(shouldRetarget: Boolean) {
         val player = mediaPlayer ?: return
         if (!isPrepared) return
@@ -1436,6 +1584,10 @@ private class FusionPreviewNativeView(
         pendingSeekTargetMs = null
         pendingPlayAfterSeek = false
         pendingSeekRetryCount = 0
+        pendingSeekStartedRealtimeMs = null
+        runtimeIsBuffering = false
+        runtimeFrameReady = false
+        awaitingPreviewFrame = false
         removeCallbacks(boundaryRunnable)
     }
 
@@ -1461,7 +1613,24 @@ private class FusionPreviewNativeView(
         return true
     }
 
-    override fun onSurfaceTextureUpdated(surface: SurfaceTexture) = Unit
+    override fun onSurfaceTextureUpdated(surface: SurfaceTexture) {
+        val now = SystemClock.elapsedRealtime()
+        if (isCurrentlyPlaying && lastFrameRealtimeMs > 0L) {
+            val deltaMs = now - lastFrameRealtimeMs
+            if (deltaMs >= 120L) {
+                runtimeFrameDropCount += ((deltaMs / 33L).toInt() - 1).coerceAtLeast(1)
+            }
+        }
+        lastFrameRealtimeMs = now
+        runtimeFrameReady = true
+        runtimeIsBuffering = false
+        if (awaitingPreviewFrame && lastTransportMutationRealtimeMs > 0L) {
+            runtimePreviewLatencyMillis =
+                (now - lastTransportMutationRealtimeMs).coerceAtLeast(0L).toDouble()
+            awaitingPreviewFrame = false
+        }
+        reportRuntimeState()
+    }
 
     private fun sceneIdentityKey(): String {
         val overlayNodes = currentSceneNodes.filter {

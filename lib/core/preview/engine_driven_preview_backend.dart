@@ -314,15 +314,22 @@ class EngineDrivenPreviewBackend extends FusionPreviewBackend {
     await _eventsSubscription?.cancel();
     _eventsSubscription = FusionPreviewSessionBridge.watchPreviewEvents(
       projectId,
-    ).listen((event) {
-      _state = _state.copyWith(
-        positionSeconds: event.positionSeconds,
-        isPlaying: event.isPlaying,
-        transportRevision: event.transportRevision,
-        isBuffering: event.isBuffering,
-        isFrameReady: event.frameReady,
-      );
-      notifyListeners();
-    });
+    ).listen(handleRuntimeEvent);
+  }
+
+  void handleRuntimeEvent(PreviewRuntimeEvent event) {
+    _state = _state.copyWith(
+      positionSeconds: event.positionSeconds,
+      isPlaying: event.isPlaying,
+      transportRevision: event.transportRevision,
+      isBuffering: event.isBuffering,
+      isFrameReady: event.frameReady,
+      frameDropCount: event.frameDropCount,
+      audioDropCount: event.audioDropCount,
+      bufferUnderrunCount: event.bufferUnderrunCount,
+      previewLatencyMillis: event.previewLatencyMillis,
+      seekLatencyMillis: event.seekLatencyMillis,
+    );
+    notifyListeners();
   }
 }

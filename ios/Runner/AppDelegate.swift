@@ -1,6 +1,7 @@
 import UIKit
 import Flutter
 import AVFoundation
+import QuartzCore
 
 @UIApplicationMain
 @objc class AppDelegate: FlutterAppDelegate {
@@ -1097,6 +1098,7 @@ private final class FusionPreviewRegistry {
 
   private var views: [Int64: NSHashTable<FusionPreviewNativeView>] = [:]
   private var payloads: [Int64: FusionPreviewPayload] = [:]
+  private var runtimeStates: [Int64: FusionPreviewRuntimeState] = [:]
   private var eventSink: FlutterEventSink?
 
   private init() {}
@@ -1137,6 +1139,10 @@ private final class FusionPreviewRegistry {
 
   func detach(view: FusionPreviewNativeView, projectId: Int64) {
     views[projectId]?.remove(view)
+    if views[projectId]?.allObjects.isEmpty ?? true {
+      views.removeValue(forKey: projectId)
+      runtimeStates.removeValue(forKey: projectId)
+    }
   }
 
   func update(
@@ -1303,18 +1309,30 @@ private final class FusionPreviewRegistry {
     }
   }
 
+  func reportRuntimeState(projectId: Int64, state: FusionPreviewRuntimeState) {
+    runtimeStates[projectId] = state
+    guard let payload = payloads[projectId] else { return }
+    emitRuntimeEvent(projectId: projectId, payload: payload)
+  }
+
   private func emitRuntimeEvent(
     projectId: Int64,
     payload: FusionPreviewPayload,
     sink: FlutterEventSink? = nil
   ) {
+    let runtimeState = runtimeStates[projectId]
     let event: [String: Any] = [
       "projectId": projectId,
-      "positionSeconds": payload.positionSeconds,
-      "isPlaying": payload.isPlaying,
-      "transportRevision": payload.transportRevision,
-      "isBuffering": false,
-      "frameReady": payload.sourceId != nil || payload.sourcePath != nil,
+      "positionSeconds": runtimeState?.positionSeconds ?? payload.positionSeconds,
+      "isPlaying": runtimeState?.isPlaying ?? payload.isPlaying,
+      "transportRevision": runtimeState?.transportRevision ?? payload.transportRevision,
+      "isBuffering": runtimeState?.isBuffering ?? false,
+      "frameReady": runtimeState?.frameReady ?? (payload.sourceId != nil || payload.sourcePath != nil),
+      "frameDropCount": runtimeState?.frameDropCount ?? 0,
+      "audioDropCount": runtimeState?.audioDropCount ?? 0,
+      "bufferUnderrunCount": runtimeState?.bufferUnderrunCount ?? 0,
+      "previewLatencyMillis": runtimeState?.previewLatencyMillis ?? 0.0,
+      "seekLatencyMillis": runtimeState?.seekLatencyMillis ?? 0.0,
     ]
     (sink ?? eventSink)?(event)
   }
@@ -1361,6 +1379,19 @@ private struct FusionPreviewPayload {
   let audioNodes: [[String: Any]]
   let positionSeconds: Double
   let isPlaying: Bool
+}
+
+private struct FusionPreviewRuntimeState {
+  let positionSeconds: Double
+  let isPlaying: Bool
+  let transportRevision: Int64
+  let isBuffering: Bool
+  let frameReady: Bool
+  let frameDropCount: Int
+  let audioDropCount: Int
+  let bufferUnderrunCount: Int
+  let previewLatencyMillis: Double
+  let seekLatencyMillis: Double
 }
 
 private final class FusionPreviewViewFactory: NSObject, FlutterPlatformViewFactory {
@@ -1434,6 +1465,18 @@ private final class FusionPreviewNativeView: UIView {
   private var preloadedSourceStartSeconds: Double = 0
   private var preloadedSourceEndSeconds: Double?
   private var lastAppliedTransportRevision: Int64 = -1
+  private var runtimeIsBuffering = false
+  private var runtimeFrameReady = false
+  private var runtimeFrameDropCount = 0
+  private var runtimeAudioDropCount = 0
+  private var runtimeBufferUnderrunCount = 0
+  private var runtimePreviewLatencyMillis: Double = 0
+  private var runtimeSeekLatencyMillis: Double = 0
+  private var lastTransportMutationTime: CFTimeInterval = 0
+  private var lastRuntimeEmitTime: CFTimeInterval = 0
+  private var lastFrameTickTime: CFTimeInterval = 0
+  private var pendingSeekStartedTime: CFTimeInterval?
+  private var awaitingPreviewFrame = false
 
   init(frame: CGRect, projectId: Int64) {
     self.projectId = projectId
@@ -1577,6 +1620,9 @@ private final class FusionPreviewNativeView: UIView {
     currentAudioNodes = audioNodes
     currentPosition = positionSeconds
     isCurrentlyPlaying = isPlaying
+    if sourceChanged || transportChanged || playStateChanged {
+      noteTransportMutation(expectFrame: currentSourceKind == "video")
+    }
     if sourceChanged {
       loadSource()
     }
@@ -1594,6 +1640,7 @@ private final class FusionPreviewNativeView: UIView {
     applyTransport(shouldRetarget: sourceChanged || transportChanged)
     applyOverlayTransport()
     applyAudioTransport()
+    reportRuntimeState(force: true)
   }
 
   private var currentPosition: Double = 0
@@ -1645,6 +1692,10 @@ private final class FusionPreviewNativeView: UIView {
       imageView.isHidden = true
       currentSourceId = nil
       clearPreloadedSource()
+      runtimeFrameReady = false
+      awaitingPreviewFrame = false
+      runtimeIsBuffering = false
+      reportRuntimeState(force: true)
       return
     }
 
@@ -1659,6 +1710,7 @@ private final class FusionPreviewNativeView: UIView {
       player = newPlayer
       playerLayer.player = newPlayer
       playerLayer.isHidden = false
+      runtimeFrameReady = false
       addPlaybackObserver(to: newPlayer)
       applyBaseAudioSettings()
     case "image":
@@ -1670,6 +1722,10 @@ private final class FusionPreviewNativeView: UIView {
       playerLayer.isHidden = true
       imageView.image = takePreloadedImageIfMatching() ?? UIImage(contentsOfFile: sourcePath)
       imageView.isHidden = false
+      runtimeFrameReady = imageView.image != nil
+      awaitingPreviewFrame = false
+      runtimeIsBuffering = false
+      reportRuntimeState(force: true)
     default:
       silencePlayer(player)
       player?.pause()
@@ -1679,6 +1735,10 @@ private final class FusionPreviewNativeView: UIView {
       playerLayer.isHidden = true
       imageView.image = nil
       imageView.isHidden = true
+      runtimeFrameReady = false
+      awaitingPreviewFrame = false
+      runtimeIsBuffering = false
+      reportRuntimeState(force: true)
     }
   }
 
@@ -1848,10 +1908,73 @@ private final class FusionPreviewNativeView: UIView {
   }
 
   private func seekPlayer(_ player: AVPlayer, to target: CMTime) {
+    pendingSeekStartedTime = CACurrentMediaTime()
+    runtimeIsBuffering = true
     player.seek(
       to: target,
       toleranceBefore: .zero,
       toleranceAfter: .zero
+    ) { [weak self] _ in
+      guard let self else { return }
+      if let pendingSeekStartedTime = self.pendingSeekStartedTime {
+        self.runtimeSeekLatencyMillis = max(0, (CACurrentMediaTime() - pendingSeekStartedTime) * 1000.0)
+      }
+      self.pendingSeekStartedTime = nil
+      self.runtimeIsBuffering = false
+      self.reportRuntimeState(force: true)
+    }
+  }
+
+  private func noteTransportMutation(expectFrame: Bool) {
+    lastTransportMutationTime = CACurrentMediaTime()
+    awaitingPreviewFrame = expectFrame
+    if expectFrame {
+      runtimeFrameReady = false
+    } else {
+      runtimeFrameReady = currentSourceKind == "image" && currentSourcePath != nil
+      runtimePreviewLatencyMillis = 0
+    }
+  }
+
+  private func noteFrameTick() {
+    let now = CACurrentMediaTime()
+    if isCurrentlyPlaying && lastFrameTickTime > 0 {
+      let delta = now - lastFrameTickTime
+      if delta >= 0.12 {
+        let estimatedDrops = max(1, Int((delta / (1.0 / 30.0)).rounded(.down)) - 1)
+        runtimeFrameDropCount += estimatedDrops
+      }
+    }
+    lastFrameTickTime = now
+    runtimeFrameReady = true
+    runtimeIsBuffering = false
+    if awaitingPreviewFrame && lastTransportMutationTime > 0 {
+      runtimePreviewLatencyMillis = max(0, (now - lastTransportMutationTime) * 1000.0)
+      awaitingPreviewFrame = false
+    }
+    reportRuntimeState()
+  }
+
+  private func reportRuntimeState(force: Bool = false) {
+    let now = CACurrentMediaTime()
+    if !force && (now - lastRuntimeEmitTime) < (1.0 / 30.0) {
+      return
+    }
+    lastRuntimeEmitTime = now
+    FusionPreviewRegistry.shared.reportRuntimeState(
+      projectId: projectId,
+      state: FusionPreviewRuntimeState(
+        positionSeconds: currentProjectPlaybackSeconds(),
+        isPlaying: isCurrentlyPlaying,
+        transportRevision: max(0, lastAppliedTransportRevision),
+        isBuffering: runtimeIsBuffering,
+        frameReady: runtimeFrameReady,
+        frameDropCount: runtimeFrameDropCount,
+        audioDropCount: runtimeAudioDropCount,
+        bufferUnderrunCount: runtimeBufferUnderrunCount,
+        previewLatencyMillis: runtimePreviewLatencyMillis,
+        seekLatencyMillis: runtimeSeekLatencyMillis
+      )
     )
   }
 
@@ -1880,17 +2003,30 @@ private final class FusionPreviewNativeView: UIView {
     }
 
     if shouldSeek {
+      runtimeIsBuffering = true
+      pendingSeekStartedTime = CACurrentMediaTime()
       player.seek(
         to: target,
         toleranceBefore: seekTolerance,
         toleranceAfter: seekTolerance
-      ) { _ in
+      ) { [weak self] _ in
+        guard let self else { return }
+        if let pendingSeekStartedTime = self.pendingSeekStartedTime {
+          self.runtimeSeekLatencyMillis = max(
+            0,
+            (CACurrentMediaTime() - pendingSeekStartedTime) * 1000.0
+          )
+        }
+        self.pendingSeekStartedTime = nil
+        self.runtimeIsBuffering = false
         playOrPause()
         self.applyOverlayTransport(referenceProjectSeconds: self.currentProjectPlaybackSeconds())
+        self.reportRuntimeState(force: true)
       }
     } else {
       playOrPause()
       applyOverlayTransport(referenceProjectSeconds: currentProjectPlaybackSeconds())
+      reportRuntimeState(force: true)
     }
   }
 
@@ -1900,6 +2036,7 @@ private final class FusionPreviewNativeView: UIView {
       queue: .main
     ) { [weak self] _ in
       guard let self else { return }
+      self.noteFrameTick()
       self.applyOverlayTransport(referenceProjectSeconds: self.currentProjectPlaybackSeconds())
     }
   }

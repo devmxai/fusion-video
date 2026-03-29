@@ -19,6 +19,91 @@ This roadmap is authoritative for:
 - Rust contract first, adapters second
 - current preview path remains fallback only until Phase 2 closes
 - Android is not a later port; it is a first-class track
+- feature expansion pauses when playback/audio stability is below target
+
+## Current Program Focus — Execution Stabilization
+
+### Why This Phase Exists
+
+The architecture and wiring foundations are now present, but the execution layer
+is not yet stable enough for production-grade editing.
+
+Current critical symptoms observed in real use:
+
+- playback hitching and visible stops
+- unstable preview continuity
+- scrub/seek latency or incorrectness
+- intermittent audio loss or stutter
+- black frames or seam glitches in some cases
+
+This means the current bottleneck is not feature breadth.
+It is execution quality in:
+
+- preview
+- audio
+- scheduling
+- seam handoff
+
+### Program Rules During Stabilization
+
+- no transitions priority
+- no effects priority
+- no UI polish priority
+- no timeline feature expansion priority
+- no phase is considered healthy while playback is visibly unstable
+
+### Stabilization Epics
+
+#### S1. Preview Pipeline Determinism
+
+- make preview frame selection timeline-authoritative
+- remove dependence on generic player timing behavior
+- ensure each visible frame comes from:
+  - timeline position
+  - clip-local mapped source time
+  - decoded frame
+  - rendered frame
+
+#### S2. Scheduling And Buffering
+
+- add preroll before playhead
+- add frame buffering near playhead
+- add next-clip preloading
+- prevent decode starvation during normal playback
+
+#### S3. Clock Unification
+
+- Rust transport clock becomes the only runtime clock
+- video scheduling derives from Rust clock
+- audio scheduling derives from Rust clock
+- preview state derives from Rust clock
+
+#### S4. Seam Execution
+
+- no hard reattach for same-source contiguous seams
+- controlled preload/preroll for different-source seams
+- stable video-image handoff
+
+#### S5. Audio Execution
+
+- real audio decode path
+- real audio buffering
+- real mixer behavior
+- audio transport sync
+
+#### S6. Android Execution Migration
+
+- begin true `MediaCodec` decode path in parallel
+- do not expand `MediaPlayer` path beyond fallback needs
+- begin EGL/OpenGL preview renderer migration incrementally
+
+#### S7. Metrics And Runtime Diagnostics
+
+- dropped-frame counting
+- audio-drop counting
+- preview latency tracking
+- seek latency tracking
+- buffer underrun tracking
 
 ## Phase 0 — Contract Reset
 
@@ -97,6 +182,7 @@ Make preview clip-time-authoritative on iOS and Android.
 - scrub updates preview immediately
 - pause frame render comes from engine preview path
 - play starts from exact current timeline position
+- no visible frame jitter during normal playback
 
 #### E1.3 Stable Preview Binding
 
@@ -113,6 +199,7 @@ iOS:
 Android:
 
 - authoritative preview transport adapter
+- early execution-layer path beyond generic player defaults
 
 ### Deliverables
 
@@ -153,6 +240,7 @@ Remove hitching and visual instability at clip junctions.
 - preload next source
 - preroll before seam
 - avoid black flash
+- avoid visible playback stop at the seam
 
 #### E2.4 Video-Image Handoff
 
@@ -197,6 +285,7 @@ Replace unstable preview audio with a real synchronized audio path.
 
 - lock audio clock to preview transport
 - avoid dropouts and choked playback
+- maintain stable audio while scrubbing, seeking, and resuming playback
 
 #### E3.4 Export Audio Parity
 
@@ -320,8 +409,10 @@ Build advanced editor features only after core parity and stability exist.
 
 The next execution priority is:
 
-1. close Phase 0 fully
-2. close Phase 1 fully
-3. close Phase 2 before adding advanced editor features
+1. execute `Execution Stabilization` across Phase 1 and Phase 2 immediately
+2. stabilize playback and audio before any new feature expansion
+3. close Phase 1 fully
+4. close Phase 2 fully
+5. move into Phase 3 only with stable preview behavior already achieved
 
 If playback, seam continuity, or audio are unstable, feature work must not jump ahead.

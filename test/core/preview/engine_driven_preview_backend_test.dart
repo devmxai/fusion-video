@@ -112,4 +112,36 @@ void main() {
 
     await backend.disposeBackend();
   });
+
+  test('runtime metrics events update backend state', () async {
+    final backend = EngineDrivenPreviewBackend(projectId: 9);
+
+    backend.handleRuntimeEvent(
+      const PreviewRuntimeEvent(
+        projectId: 9,
+        positionSeconds: 4.25,
+        isPlaying: true,
+        transportRevision: 11,
+        isBuffering: true,
+        frameReady: true,
+        frameDropCount: 3,
+        audioDropCount: 1,
+        bufferUnderrunCount: 2,
+        previewLatencyMillis: 47,
+        seekLatencyMillis: 92,
+      ),
+    );
+
+    expect(backend.state.positionSeconds, 4.25);
+    expect(backend.state.isPlaying, isTrue);
+    expect(backend.state.isBuffering, isTrue);
+    expect(backend.state.isFrameReady, isTrue);
+    expect(backend.state.frameDropCount, 3);
+    expect(backend.state.audioDropCount, 1);
+    expect(backend.state.bufferUnderrunCount, 2);
+    expect(backend.state.previewLatencyMillis, 47);
+    expect(backend.state.seekLatencyMillis, 92);
+
+    await backend.disposeBackend();
+  });
 }

@@ -17,6 +17,30 @@ A phase closes only when its required behavior is verified on:
 - one-platform success is not enough
 - UI movement without preview correctness does not count as success
 - playback correctness must be measured from timeline truth, not player default behavior
+- no feature phase is allowed to hide playback instability behind UX workarounds
+
+## Execution Stabilization Acceptance
+
+This program focus must close before advanced media features resume.
+
+### Required Outcomes
+
+- playback is visibly smooth in normal editing conditions
+- preview remains stable during play, pause, seek, and scrub
+- audio is consistently present and synchronized
+- no recurring black frames appear at common seams
+- Android and iOS behave materially the same in core playback scenarios
+
+### Blocking Failure Conditions
+
+The stabilization phase remains open if any of the following is still common:
+
+- repeated playback hitching
+- preview freeze while timeline position changes
+- scrub that moves UI but not preview frame immediately
+- audio dropout during normal playback
+- frequent seam hitching between adjacent clips
+- playback restarting from incorrect source position after split/delete
 
 ## Phase 0 Acceptance — Contract Reset
 
@@ -46,6 +70,7 @@ A phase closes only when its required behavior is verified on:
 - pause shows correct pause frame
 - pressing play after scrub starts from exact scrubbed position
 - play near clip end continues from that exact point
+- normal playback does not visibly repeat a single stale frame
 
 ### Timeline Integrity Tests
 
@@ -69,6 +94,7 @@ A phase closes only when its required behavior is verified on:
 - play across `video -> video` seam with no visible hitch
 - play across `video -> image` seam with no black flash
 - same-source non-contiguous case behaves correctly without false continuity
+- deleting or reordering split parts preserves deterministic continuity
 
 ### Visual Closure
 
@@ -92,6 +118,7 @@ A phase closes only when its required behavior is verified on:
 - mute applies correctly
 - fades apply correctly
 - audio remains synchronized through seek, scrub, and seam playback
+- audio stays stable across repeated play/pause cycles
 
 ### Export Audio Tests
 
@@ -174,17 +201,22 @@ These are directionally mandatory even if exact numbers evolve later.
 - low scrub latency
 - no visible hitch at common seams
 - stable playback on mid-tier Android
+- preview latency is measurable
+- dropped-frame count is measurable
 
 ### Audio
 
 - no obvious dropouts in normal playback
 - no repeated audio attach/detach artifacts
+- audio drop count is measurable
+- underrun tracking is measurable
 
 ### Render
 
 - dropped frame monitoring exists
 - frame readiness is observable
 - memory pressure behavior is defined
+- no persistent black-frame churn during normal playback
 
 ### Export
 
