@@ -1,494 +1,393 @@
 # Fusion Video Engine Spec
 
-## Purpose
+## Status
 
-This document defines the first stable architecture for the local editing engine
-that will power Fusion Video on iOS and Android.
+This document is the official engine architecture decision for Fusion Video.
 
-Flutter is responsible for:
+It replaces any implicit "iOS first" or "Flutter-driven media behavior" model.
+From this point forward, the engine must be built as one logical system with:
 
-- editor shell UI
-- timeline gestures and toolbars
-- panels, sheets, and user flows
-- platform navigation and app lifecycle
+- Rust as the source of truth
+- iOS and Android implemented in the same phase
+- Flutter limited to UI and user intents
+- the current preview path treated as temporary fallback only
 
-The engine is responsible for:
+## Core Decision
 
-- project state execution
-- playback clock
-- seek and scrub
-- frame-accurate timeline operations
-- decode scheduling
-- audio mixing
-- compositing
-- export
+Fusion Video will use a:
 
-The goal is to make the engine expandable enough for future features like:
+- parallel engine migration
+- feature-flagged rollout
+- dual-platform implementation model
 
-- camera-style transitions
-- push and pan transitions
-- color adjustment stacks
-- keyframes
-- AI-assisted tools
-- image generation
-- lip sync upgrades
-- proxy playback and adaptive preview quality
+It will not use:
 
-## Design Goals
+- direct rewrite on top of the current preview path
+- iOS-first then Android-later execution
+- long-term `MediaPlayer` / `TextureView` dependency
+- Flutter-owned preview or playback logic
 
-1. Local-first execution
-   - No server dependency for editing, playback, or export.
-2. Frame-accurate timeline model
-   - Split, trim, seek, and export must resolve to stable timeline positions.
-3. GPU-first preview path
-   - The preview path must prefer hardware decode and hardware composition where possible.
-4. Expandable render graph
-   - Effects and transitions must be attachable as graph nodes rather than hardcoded one-offs.
-5. Stable Flutter boundary
-   - Flutter should talk to a narrow, versioned engine API instead of touching media internals.
-6. Predictable performance
-   - Playback quality should degrade gracefully before UI responsiveness is lost.
+## Architectural Principles
 
-## Non-Goals For The First Engine MVP
+### 1. One Engine, Two Adapters
 
-- AI rendering inside the engine
-- cloud sync
-- collaborative editing
-- advanced motion tracking
-- desktop support
+We are not building two editors.
 
-## Runtime Layers
+We are building:
 
-### 1. Flutter UI Layer
+- one engine model
+- one timeline model
+- one transport model
+- one scene model
+- one audio model
 
-Owns:
+With:
+
+- one iOS adapter
+- one Android adapter
+
+### 2. Rust Is The Single Source Of Truth
+
+Rust owns:
+
+- timeline state
+- transport state
+- scene snapshot resolution
+- audio snapshot resolution
+- active clip resolution
+- playback mapping
+- source offsets
+- continuity rules
+- seam classification
+- preview scheduling intent
+- export render planning
+
+Rust must not be reduced to a simple timeline helper.
+It is the editor transport authority.
+
+### 3. Flutter Is UI Only
+
+Flutter owns:
 
 - layout
 - gestures
-- selection
-- editor tools
-- bottom sheets
-- inspector panels
+- selection visuals
+- sheets
+- toolbars
+- inspectors
+- navigation
 
-Does not own:
+Flutter must not own:
 
-- decode
-- audio playback pipeline
-- final export graph
+- decode behavior
+- preview playback rules
+- clip-time mapping
+- seam handling
+- audio transport logic
+- export graph logic
 
-### 2. Engine Bridge Layer
+Flutter sends intents in.
+Engine state and runtime events come out.
 
-Owns:
+### 4. Android Must Become A Real Engine Path
 
-- FFI bindings
-- request/response marshaling
-- typed engine events
-- handle management
+The target Android stack is:
 
-### 3. Engine Core Layer
+- media I/O: `MediaExtractor`
+- decode: `MediaCodec`
+- render: `EGL + OpenGL ES 3.x`
+- audio: real mixer engine
+- export: decode -> compose -> encode pipeline
 
-Recommended implementation:
+Android must move to:
 
-- Rust as the orchestration core
-- platform codec/render adapters behind the core
+- decoded frames + render graph
 
-Owns:
+Not:
 
-- project graph
-- track/clip/effect graph
-- transport clock
-- preview scheduling
-- frame cache and proxy policy
+- generic player-session behavior
 
-### 4. Platform Media Layer
+The current `TextureView + MediaPlayer` path may stay only as fallback until the new path closes Phase 2.
+
+### 5. iOS And Android Move Together
+
+Any engine feature is incomplete unless it works on both:
+
+- iOS
+- Android
+
+No feature is considered done when it exists on one platform only.
+
+## Runtime Stack
+
+### Flutter Layer
+
+Responsibilities:
+
+- UI shell
+- gesture capture
+- intent dispatch
+- state presentation
+
+### Bridge Layer
+
+Responsibilities:
+
+- FFI and platform bridge transport
+- typed command marshaling
+- typed event marshaling
+- backend selection
+
+### Rust Core
+
+Responsibilities:
+
+- project model
+- timeline operations
+- transport authority
+- preview resolution
+- continuity classification
+- render planning
+- audio planning
+- export planning
+
+### Platform Adapters
 
 iOS:
 
 - AVFoundation
-- VideoToolbox
-- Metal
+- GPU-backed render path
+- native audio/output path
 
 Android:
 
+- MediaExtractor
 - MediaCodec
-- MediaExtractor or Media3
-- OpenGL ES or Vulkan
+- OpenGL ES
+- mixer/output path
 
-### 5. Export Layer
+## Official Engine Modules
 
-Preferred path:
+### `project_core`
 
-- hardware encoder when available
+Owns:
 
-Fallback path:
-
-- FFmpeg-based software or format fallback
-
-## Core Modules
-
-### project_core
-
-Canonical project state.
-
-Types:
-
-- Project
-- Asset
-- Track
-- Clip
-- Effect
-- Transition
-- Keyframe
-
-Responsibilities:
-
+- project schema
+- asset registry
+- tracks
+- clips
+- transitions
+- effects
 - serialization
-- versioning
-- validation
-- migration
+- migrations
 
-### timeline_engine
+### `timeline_engine`
 
-Responsibilities:
+Owns:
 
 - play
 - pause
 - seek
-- scrub
+- scrub begin
+- scrub update
+- scrub end
 - split
 - trim
-- duplicate
 - delete
-- ripple rules
-- snapping model
+- duplicate
+- reorder
+- continuity-safe reconciliation
 
-### preview_engine
+### `preview_engine`
 
-Responsibilities:
+Owns:
 
-- decode scheduling around playhead
-- frame requests
-- pause frame rendering
-- scrub frame rendering
-- playhead-driven preview updates
+- active clip resolution
+- clip-local playback mapping
+- preview transport state
+- frame request planning
+- seam-safe scheduling intent
+- preview payload generation
 
-### render_graph
+### `render_graph`
 
-Responsibilities:
+Owns:
 
 - layer ordering
 - transforms
 - opacity
-- blend/composite passes
-- transition passes
-- future color and adjustment passes
+- z-order
+- blending
+- transitions
+- future effect passes
 
-### audio_engine
+### `audio_engine`
 
-Responsibilities:
+Owns:
 
-- decode audio
-- timeline sync
-- per-track mute
-- volume and gain
-- preview mixer
-- export mixer
+- audio decode planning
+- mixer planning
+- gain
+- mute
+- fades
+- sync with transport
 
-### media_io
+### `export_engine`
 
-Responsibilities:
+Owns:
 
-- inspect imported media
-- generate proxies
-- generate thumbnails
-- generate waveform summaries
+- export plan
+- render plan for export
+- encode path selection
+- progress model
+- cancellation model
+- export errors
 
-### export_engine
+## Contract Model
 
-Responsibilities:
+The engine contract must be command/event driven.
 
-- build export render plan
-- choose hardware/software encoding path
-- monitor progress
-- emit export events
+### Commands
 
-## Canonical Data Model
+- `play`
+- `pause`
+- `seek`
+- `scrub_begin`
+- `scrub_update`
+- `scrub_end`
 
-### Asset
+### Runtime State / Events
 
-Represents source media imported into the project.
+- `current_timeline_position`
+- `playback_state`
+- `buffering_state`
+- `frame_ready`
 
-Fields:
+### Snapshots
 
-- id
-- uri
-- media type
-- width
-- height
-- duration
-- audio channels
-- sample rate
-- rotation metadata
-- proxy status
+- `scene_snapshot`
+- `audio_snapshot`
+- `active_clip_resolution`
+- `preview_continuity`
+- `junction_classification`
 
-### Track
+### Resolved Preview Payload
 
-Represents a lane of timeline content.
+The preview bridge must move toward one authoritative payload instead of partial mutations.
 
-Fields:
+Required contents:
 
-- id
-- kind: video, image, audio, text, lip_sync, effect
-- muted
-- visible
-- locked
-- order index
+- project time
+- clip-local source time
+- source window
+- active clip ids
+- current source
+- upcoming source
+- scene snapshot
+- audio snapshot
+- continuity class
 
-### Clip
+Continuity classes:
 
-Represents a time-bounded placement of an asset or generated element.
+- `same-source-contiguous`
+- `same-source-non-contiguous`
+- `different-source`
+- `video-to-image`
 
-Fields:
+## Seam-Safe Playback Rules
 
-- id
-- track id
-- asset id or generated payload id
-- timeline start
-- duration
-- source in
-- source duration
-- transform snapshot
-- transition in/out ids
-- selection state is UI-only and must stay outside engine state
+### Same-Source Contiguous
 
-### Effect
+If two adjacent clips come from the same source and are source-contiguous:
 
-Effects attach to clip or track scopes.
+- do not treat the seam as a hard source switch
+- do not reattach unnecessarily
+- do not reseek to asset time zero
+- keep attachment stable where possible
 
-Examples:
+### Same-Source Non-Contiguous
 
-- transform
-- opacity
-- crop
-- color adjustment
-- blur
-- sharpen
-- LUT
+If the same source is reused but offsets are not contiguous:
 
-### Transition
+- preserve clip-local mapping
+- allow controlled reseek
+- do not confuse this case with contiguous seams
 
-Transition is a first-class object, not a visual shortcut.
+### Different-Source
 
-Fields:
+If the next clip is a different source:
 
-- id
-- left clip id
-- right clip id
-- duration
-- type
-- parameter bag
+- preload next visual source before seam
+- prepare the handoff before the current clip ends
+- avoid black flash and attachment churn
 
-This keeps room for:
+### Video-To-Image
 
-- dissolve
-- wipe
-- push left/right/up/down
-- zoom camera transitions
+If the next visible node is an image:
 
-## Playback Model
+- preload image payload
+- render handoff without black frame
+- do not fall back to player-style empty frame transitions
 
-The engine owns the authoritative transport clock.
+## Migration Strategy
 
-Important rules:
+### Feature Flag
 
-- Flutter does not calculate playback time on its own once the engine is live.
-- Flutter sends intent:
-  - play
-  - pause
-  - seek
-  - scrub begin
-  - scrub update
-  - scrub end
-- Engine sends back:
-  - current timeline position
-  - playback state
-  - buffering state
-  - visible frame readiness
+The migration must stay behind:
 
-### Preview Strategy
+- `FUSION_USE_ENGINE_DRIVEN_PREVIEW`
 
-For smooth mobile playback:
+Rules:
 
-- decode ahead around playhead
-- maintain a short frame cache window
-- use lower-cost proxy frames during high-velocity scrubbing when needed
-- always render an explicit last-good frame instead of flashing black
+- `false` = current preview path remains fallback
+- `true` = engine-driven preview path is used
 
-## Performance Strategy
+### Parallel Engine Rule
 
-### Tier 1
+The new engine path must be built in parallel.
 
-Required for MVP:
+We do not stop the project and rewrite everything in place.
+We migrate capability by capability behind stable contracts.
 
-- visible-range thumbnails only
-- waveform generation in background isolate or engine worker
-- decode-ahead window
-- frame cache near playhead
-- audio preroll
+## Development Rules
 
-### Tier 2
+### Mandatory Rules
 
-Next step:
+- every media feature starts from contract definition
+- every media feature is implemented on iOS and Android in the same phase
+- Rust API is defined before adapter behavior
+- no new long-term feature may be built on `MediaPlayer`
+- no new long-term feature may be built on `TextureView`
+- no merge for media features without dual-platform validation
+- current preview path remains temporary fallback only
+- engine parity and preview stability are higher priority than new UI features
 
-- proxy media generation
-- adaptive preview resolution
-- clip prewarm
-- idle-time cache fill
+### Anti-Patterns To Avoid
 
-### Tier 3
+- partial preview updates that compete with each other
+- Flutter deciding playback mapping locally
+- player defaults overriding clip-local time
+- iOS behavior shipped first with Android deferred
+- UI-only workarounds for preview/audio defects
 
-For large projects:
+## Success Criteria
 
-- smart memory pressure policy
-- reusable texture pools
-- background export worker
+The engine direction is correct only if it produces:
 
-## Transition And Effects Strategy
+- frame-accurate scrub
+- play-from-current-position correctness
+- stable split/delete/reorder playback mapping
+- seam-safe preview continuity
+- stable audio without dropouts
+- visual parity across iOS and Android
+- export parity across iOS and Android
 
-The render graph must support:
+## Implementation Order
 
-- clip-local effects
-- track-level effects
-- project-level adjustments
-- transitions between adjacent clips
+The implementation order is defined in:
 
-Every future visual feature should fit as one of:
+- [ENGINE_ROADMAP.md](/Users/mx/Documents/New%20project/fx_flutter_editor/docs/ENGINE_ROADMAP.md)
 
-- source node
-- transform node
-- effect node
-- transition node
-- output node
+Acceptance and exit criteria are defined in:
 
-This prevents rewrite later when adding:
-
-- push in
-- push up
-- pan left/right
-- cinematic blur transitions
-- color grading chains
-
-## AI Readiness Strategy
-
-AI tools must live above the engine, not inside the transport/render core.
-
-Recommended AI architecture:
-
-- AI requests generate assets, keyframes, captions, or effect presets
-- engine consumes the results as normal project data
-
-Examples:
-
-- generated image becomes an Asset
-- smart caption becomes text clips
-- AI transition suggestion becomes a Transition preset
-- AI lip sync becomes generated timeline data
-
-## Folder Strategy
-
-This repo will use:
-
-- `docs/` for architecture and build specs
-- `engine/rust_core/` for the orchestration core
-- `lib/core/engine/` for Flutter-side contracts and bridge code
-
-## Delivery Phases
-
-### Phase 1
-
-Spec and contracts only.
-
-Deliverables:
-
-- engine spec
-- Rust folder scaffold
-- Flutter FFI contract scaffold
-
-### Phase 2
-
-Single-video preview MVP.
-
-Deliverables:
-
-- open local video
-- play/pause
-- seek
-- scrub
-- pause frame render
-
-### Phase 3
-
-Editing core.
-
-Deliverables:
-
-- split
-- trim left/right
-- delete
-- duplicate
-- undo/redo hooks
-
-### Phase 4
-
-Multi-track compositing.
-
-Deliverables:
-
-- image track
-- text track
-- audio track
-- basic transforms
-
-### Phase 5
-
-Transitions and adjustments.
-
-### Phase 6
-
-Export pipeline.
-
-## First Sprint Recommendation
-
-The first implementation sprint should not attempt transitions or export.
-
-It should build only:
-
-- engine project handle
-- asset registration
-- transport clock
-- preview playback for one video clip
-- seek and scrub callbacks
-
-If this sprint is stable, the rest of the editor can grow safely on top of it.
-
-## Official Migration Rule
-
-The engine migration path is now:
-
-- parallel backend, not direct rewrite
-- Rust contracts first
-- iOS and Android adapters in the same phase
-- Flutter UI selects a preview backend but does not own media logic
-
-Current implementation rule:
-
-- `FUSION_USE_ENGINE_DRIVEN_PREVIEW=false`
-  - uses the current native preview session path as fallback
-- `FUSION_USE_ENGINE_DRIVEN_PREVIEW=true`
-  - uses the new engine-driven preview bridge and transport commands
-
-This flag exists so the repository can evolve toward:
-
-- resolved preview payloads
-- command/event transport
-- codec/render/audio adapters behind one engine-owned contract
+- [ENGINE_ACCEPTANCE.md](/Users/mx/Documents/New%20project/fx_flutter_editor/docs/ENGINE_ACCEPTANCE.md)

@@ -63,29 +63,24 @@ What is still considered actively under construction:
 - true compositor/render path
 - export parity across iOS and Android
 
-### Architecture Phase Status
+### Official Engine Documents
 
-- `Phase 0`: completed
-  - Flutter = UI
-  - Rust = orchestration / timeline / transport
-  - iOS/Android native = preview plumbing
-- `Phase 1`: completed
-  - `video_player` removed
-  - native media-backed preview path in place
-- `Phase 2`: completed in foundation form
-  - asset registry inside the engine
-  - timeline clips bound to real imported assets
-  - clip source offsets wired into preview timing
-  - clip-bounded preview playback and project duration synchronization
-- `Phase 3`: in active progress
-  - composition scene snapshots
-  - native multi-node preview on iOS
-  - audio scene foundation and clip gain/mute support
-  - export foundation for iOS
-- `Phase 4+`: not started yet
-  - transitions
-  - full export graph
-  - performance pass
+The official engine direction is now defined in:
+
+- [docs/ENGINE_SPEC.md](/Users/mx/Documents/New%20project/fx_flutter_editor/docs/ENGINE_SPEC.md)
+- [docs/ENGINE_ROADMAP.md](/Users/mx/Documents/New%20project/fx_flutter_editor/docs/ENGINE_ROADMAP.md)
+- [docs/ENGINE_ACCEPTANCE.md](/Users/mx/Documents/New%20project/fx_flutter_editor/docs/ENGINE_ACCEPTANCE.md)
+
+These documents now supersede older informal "iOS first" or "preview plumbing only"
+assumptions.
+
+Current practical status:
+
+- the repository already contains a real engine foundation
+- the new `engine-driven preview` migration path exists behind feature flag
+- the current native preview path is still fallback only
+- the next execution priority is closing the new contract/preview phases on both platforms
+- no advanced media feature should be treated as complete until it passes on iOS and Android together
 
 ## What Has Been Built
 
