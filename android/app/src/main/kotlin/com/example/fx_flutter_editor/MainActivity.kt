@@ -10,6 +10,7 @@ import android.graphics.drawable.GradientDrawable
 import android.media.AudioAttributes
 import android.media.MediaMetadataRetriever
 import android.media.MediaPlayer
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -66,6 +67,8 @@ class MainActivity : FlutterActivity() {
             val upcomingSourceId = args?.get("upcomingSourceId") as? String
             val upcomingSourcePath = args?.get("upcomingSourcePath") as? String
             val upcomingSourceKind = args?.get("upcomingSourceKind") as? String
+            val clipStartSeconds = (args?.get("clipStartSeconds") as? Number)?.toDouble()
+            val clipEndSeconds = (args?.get("clipEndSeconds") as? Number)?.toDouble()
             val sourceStartSeconds = (args?.get("sourceStartSeconds") as? Number)?.toDouble()
             val sourceEndSeconds = (args?.get("sourceEndSeconds") as? Number)?.toDouble()
             val upcomingSourceStartSeconds =
@@ -101,6 +104,8 @@ class MainActivity : FlutterActivity() {
                 upcomingSourceId,
                 upcomingSourcePath,
                 upcomingSourceKind,
+                clipStartSeconds,
+                clipEndSeconds,
                 sourceStartSeconds,
                 sourceEndSeconds,
                 upcomingSourceStartSeconds,
@@ -319,6 +324,8 @@ private object FusionPreviewRegistry {
                 it.upcomingSourceId,
                 it.upcomingSourcePath,
                 it.upcomingSourceKind,
+                it.clipStartSeconds,
+                it.clipEndSeconds,
                 it.sourceStartSeconds,
                 it.sourceEndSeconds,
                 it.upcomingSourceStartSeconds,
@@ -348,6 +355,8 @@ private object FusionPreviewRegistry {
         upcomingSourceId: String?,
         upcomingSourcePath: String?,
         upcomingSourceKind: String?,
+        clipStartSeconds: Double?,
+        clipEndSeconds: Double?,
         sourceStartSeconds: Double?,
         sourceEndSeconds: Double?,
         upcomingSourceStartSeconds: Double?,
@@ -369,6 +378,8 @@ private object FusionPreviewRegistry {
             upcomingSourceId = upcomingSourceId,
             upcomingSourcePath = upcomingSourcePath,
             upcomingSourceKind = upcomingSourceKind,
+            clipStartSeconds = clipStartSeconds,
+            clipEndSeconds = clipEndSeconds,
             sourceStartSeconds = sourceStartSeconds,
             sourceEndSeconds = sourceEndSeconds,
             upcomingSourceStartSeconds = upcomingSourceStartSeconds,
@@ -391,6 +402,8 @@ private object FusionPreviewRegistry {
                 upcomingSourceId,
                 upcomingSourcePath,
                 upcomingSourceKind,
+                clipStartSeconds,
+                clipEndSeconds,
                 sourceStartSeconds,
                 sourceEndSeconds,
                 upcomingSourceStartSeconds,
@@ -416,6 +429,8 @@ private data class FusionPreviewPayload(
     val upcomingSourceId: String?,
     val upcomingSourcePath: String?,
     val upcomingSourceKind: String?,
+    val clipStartSeconds: Double?,
+    val clipEndSeconds: Double?,
     val sourceStartSeconds: Double?,
     val sourceEndSeconds: Double?,
     val upcomingSourceStartSeconds: Double?,
@@ -465,6 +480,8 @@ private class FusionPreviewNativeView(
     private var upcomingSourceId: String? = null
     private var upcomingSourcePath: String? = null
     private var upcomingSourceKind: String? = null
+    private var currentClipStartSeconds: Double = 0.0
+    private var currentClipEndSeconds: Double? = null
     private var currentSourceStartSeconds: Double = 0.0
     private var currentSourceEndSeconds: Double? = null
     private var upcomingSourceStartSeconds: Double = 0.0
@@ -488,6 +505,9 @@ private class FusionPreviewNativeView(
     private var preloadedSourceEndSeconds: Double? = null
     private var isPreloadedPrepared: Boolean = false
     private var lastAppliedTransportRevision: Int = -1
+    private var pendingSeekTargetMs: Int? = null
+    private var pendingPlayAfterSeek: Boolean = false
+    private var pendingSeekRetryCount: Int = 0
     private val boundaryRunnable = object : Runnable {
         override fun run() {
             removeCallbacks(this)
@@ -536,6 +556,8 @@ private class FusionPreviewNativeView(
             null,
             null,
             null,
+            null,
+            null,
             emptyList(),
             null,
             emptyList(),
@@ -552,6 +574,8 @@ private class FusionPreviewNativeView(
         upcomingSourceId: String?,
         upcomingSourcePath: String?,
         upcomingSourceKind: String?,
+        clipStartSeconds: Double?,
+        clipEndSeconds: Double?,
         sourceStartSeconds: Double?,
         sourceEndSeconds: Double?,
         upcomingSourceStartSeconds: Double?,
@@ -596,6 +620,8 @@ private class FusionPreviewNativeView(
         this.upcomingSourceId = upcomingSourceId
         this.upcomingSourcePath = upcomingSourcePath
         this.upcomingSourceKind = upcomingSourceKind
+        currentClipStartSeconds = kotlin.math.max(0.0, clipStartSeconds ?: 0.0)
+        currentClipEndSeconds = clipEndSeconds
         currentSourceStartSeconds = nextSourceStartSeconds
         currentSourceEndSeconds = sourceEndSeconds
         this.upcomingSourceStartSeconds =
@@ -681,7 +707,7 @@ private class FusionPreviewNativeView(
             mediaPlayer = nextPlayer
             mediaPlayer?.setVolume(1f, 1f)
             mediaPlayer?.setSurface(previewSurface)
-            mediaPlayer?.setOnPreparedListener {
+            installPlayerListeners(mediaPlayer) {
                 isPrepared = true
                 applyTransport(shouldRetarget = true)
             }
@@ -705,21 +731,103 @@ private class FusionPreviewNativeView(
         muted: Boolean = false,
         onPrepared: () -> Unit,
     ): MediaPlayer {
-        return MediaPlayer().apply {
-            setAudioAttributes(
-                AudioAttributes.Builder()
-                    .setUsage(AudioAttributes.USAGE_MEDIA)
-                    .setContentType(AudioAttributes.CONTENT_TYPE_MOVIE)
-                    .build(),
-            )
-            setDataSource(path)
-            if (surface != null) {
-                setSurface(surface)
+        val player = MediaPlayer()
+        player.setAudioAttributes(
+            AudioAttributes.Builder()
+                .setUsage(AudioAttributes.USAGE_MEDIA)
+                .setContentType(AudioAttributes.CONTENT_TYPE_MOVIE)
+                .build(),
+        )
+        player.setDataSource(path)
+        if (surface != null) {
+            player.setSurface(surface)
+        }
+        player.setVolume(if (muted) 0f else 1f, if (muted) 0f else 1f)
+        player.isLooping = false
+        installPlayerListeners(player, onPrepared)
+        player.prepareAsync()
+        return player
+    }
+
+    private fun installPlayerListeners(
+        player: MediaPlayer?,
+        onPrepared: (() -> Unit)? = null,
+    ) {
+        player ?: return
+        player.setOnPreparedListener { onPrepared?.invoke() }
+        player.setOnSeekCompleteListener {
+            if (it !== mediaPlayer) {
+                return@setOnSeekCompleteListener
             }
-            setVolume(if (muted) 0f else 1f, if (muted) 0f else 1f)
-            isLooping = false
-            setOnPreparedListener { onPrepared() }
-            prepareAsync()
+            handleSeekComplete(it)
+        }
+    }
+
+    private fun clearPlayerListeners(player: MediaPlayer?) {
+        player?.setOnPreparedListener(null)
+        player?.setOnSeekCompleteListener(null)
+    }
+
+    private fun handleSeekComplete(player: MediaPlayer) {
+        if (!isPrepared || player !== mediaPlayer) {
+            return
+        }
+        val targetMs = pendingSeekTargetMs ?: run {
+            applyDesiredPlaybackState(player)
+            return
+        }
+        val completionToleranceMs = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            48
+        } else {
+            120
+        }
+        if (
+            kotlin.math.abs(player.currentPosition - targetMs) > completionToleranceMs &&
+            pendingSeekRetryCount < 1
+        ) {
+            pendingSeekRetryCount += 1
+            performPlayerSeek(player, targetMs)
+            return
+        }
+        pendingSeekRetryCount = 0
+        pendingSeekTargetMs = null
+        applyDesiredPlaybackState(player)
+    }
+
+    private fun performPlayerSeek(player: MediaPlayer, targetMs: Int) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            player.seekTo(targetMs.toLong(), MediaPlayer.SEEK_CLOSEST)
+        } else {
+            player.seekTo(targetMs)
+        }
+    }
+
+    private fun requestPlayerSeek(
+        player: MediaPlayer,
+        targetMs: Int,
+        startAfterSeek: Boolean,
+    ) {
+        pendingSeekTargetMs = targetMs
+        pendingPlayAfterSeek = startAfterSeek
+        pendingSeekRetryCount = 0
+        if (player.isPlaying) {
+            player.pause()
+        }
+        performPlayerSeek(player, targetMs)
+    }
+
+    private fun applyDesiredPlaybackState(player: MediaPlayer) {
+        val shouldPlay = pendingSeekTargetMs == null && (pendingPlayAfterSeek || isCurrentlyPlaying)
+        pendingPlayAfterSeek = false
+        removeCallbacks(boundaryRunnable)
+        if (shouldPlay) {
+            if (!player.isPlaying) {
+                player.start()
+            }
+            return
+        }
+        if (player.isPlaying) {
+            player.pause()
         }
     }
 
@@ -847,12 +955,13 @@ private class FusionPreviewNativeView(
     }
 
     private fun releasePreloadedSource() {
-        preloadedMediaPlayer?.setOnPreparedListener(null)
+        clearPlayerListeners(preloadedMediaPlayer)
         preloadedMediaPlayer?.setVolume(0f, 0f)
         preloadedMediaPlayer?.stopSafely()
         preloadedMediaPlayer?.release()
         preloadedMediaPlayer = null
         preloadedImageBitmap = null
+        preloadedSourceId = null
         preloadedSourcePath = null
         preloadedSourceKind = null
         preloadedSourceStartSeconds = 0.0
@@ -1035,21 +1144,31 @@ private class FusionPreviewNativeView(
         val player = mediaPlayer ?: return
         if (!isPrepared) return
 
-        val targetMs = clampedPositionMs(currentPositionSeconds)
-        val seekThresholdMs = if (isCurrentlyPlaying) 180 else 40
-        if (
-            shouldRetarget &&
-            kotlin.math.abs(player.currentPosition - targetMs) > seekThresholdMs
-        ) {
-            player.seekTo(targetMs)
+        val decision = PreviewTransportPlanner.decide(
+            desiredPositionSeconds = currentPositionSeconds,
+            sourceStartSeconds = currentSourceStartSeconds,
+            sourceEndSeconds = currentSourceEndSeconds,
+            playerPositionMs = player.currentPosition,
+            isPlaying = isCurrentlyPlaying,
+            shouldRetarget = shouldRetarget,
+        )
+        if (decision.shouldSeek) {
+            requestPlayerSeek(
+                player = player,
+                targetMs = decision.targetPositionMs,
+                startAfterSeek = decision.shouldStartAfterSeek,
+            )
+            return
         }
 
-        if (isCurrentlyPlaying) {
+        pendingSeekTargetMs = null
+        pendingPlayAfterSeek = false
+        if (decision.shouldStartImmediately) {
             if (!player.isPlaying) {
                 player.start()
             }
             removeCallbacks(boundaryRunnable)
-        } else if (player.isPlaying) {
+        } else if (decision.shouldPauseImmediately && player.isPlaying) {
             player.pause()
             removeCallbacks(boundaryRunnable)
         } else {
@@ -1058,24 +1177,16 @@ private class FusionPreviewNativeView(
     }
 
     private fun releasePlayer() {
-        mediaPlayer?.setOnPreparedListener(null)
+        clearPlayerListeners(mediaPlayer)
         mediaPlayer?.setVolume(0f, 0f)
         mediaPlayer?.stopSafely()
         mediaPlayer?.release()
         mediaPlayer = null
         isPrepared = false
+        pendingSeekTargetMs = null
+        pendingPlayAfterSeek = false
+        pendingSeekRetryCount = 0
         removeCallbacks(boundaryRunnable)
-    }
-
-    private fun clampedPositionMs(seconds: Double): Int {
-        val lowerBound = (currentSourceStartSeconds * 1000.0).toInt().coerceAtLeast(0)
-        val upperBound = currentSourceEndSeconds
-            ?.let { (it * 1000.0).toInt().coerceAtLeast(lowerBound) }
-        val target = (seconds * 1000.0).toInt().coerceAtLeast(0)
-        return when {
-            upperBound != null -> target.coerceIn(lowerBound, upperBound)
-            else -> target.coerceAtLeast(lowerBound)
-        }
     }
 
     override fun onSurfaceTextureAvailable(surfaceTexture: SurfaceTexture, width: Int, height: Int) {

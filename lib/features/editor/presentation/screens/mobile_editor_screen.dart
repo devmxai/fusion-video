@@ -122,7 +122,7 @@ class _MobileEditorScreenState extends State<MobileEditorScreen> {
   Future<EngineCompositionNodeSnapshot?> _currentPreviewNode({
     double? projectSeconds,
   }) async {
-    final seconds = projectSeconds ?? _engineController.currentSeconds;
+    final seconds = projectSeconds ?? _effectiveCurrentSeconds;
     final nodes = await _engineController.compositionAt(seconds);
     _compositionNodes = nodes;
     return EditorSceneMapper.resolveBasePreviewNode(
@@ -164,6 +164,7 @@ class _MobileEditorScreenState extends State<MobileEditorScreen> {
       upcomingSource: playbackResolution?.upcomingSource,
       activeBaseClipIds:
           playbackResolution?.activeClipIds ?? <String>[targetNode.clipId],
+      sourcePositionSeconds: targetNode.sourcePositionSeconds,
     );
   }
 
@@ -192,9 +193,12 @@ class _MobileEditorScreenState extends State<MobileEditorScreen> {
   }
 
   Future<void> _syncPreviewFromEngineState() async {
-    final targetNode = await _currentPreviewNode();
+    final targetProjectSeconds = _effectiveCurrentSeconds;
+    final targetNode = await _currentPreviewNode(
+      projectSeconds: targetProjectSeconds,
+    );
     _audioNodes = await _engineController.audioNodesAt(
-      _engineController.currentSeconds,
+      targetProjectSeconds,
     );
     EngineAudioNodeSnapshot? baseAudioNode;
     final targetClipId = targetNode?.clipId;
@@ -279,7 +283,7 @@ class _MobileEditorScreenState extends State<MobileEditorScreen> {
     }
 
     final previewState = _previewBackend.state;
-    final localPositionSeconds = targetNode.sourcePositionSeconds;
+    final localPositionSeconds = resolvedPlayback.sourcePositionSeconds;
     final positionDelta =
         (previewState.positionSeconds - localPositionSeconds).abs();
     final pausedTransportNeedsSync = !_engineController.isPlaying &&
@@ -532,7 +536,7 @@ class _MobileEditorScreenState extends State<MobileEditorScreen> {
           }
         }
         _schedulePreviewSeek(
-          node.sourcePositionSeconds,
+          resolvedPlayback?.sourcePositionSeconds ?? node.sourcePositionSeconds,
           immediate: !_isTimelineScrubbing,
         );
       }());
@@ -641,7 +645,7 @@ class _MobileEditorScreenState extends State<MobileEditorScreen> {
             force: true,
           );
         } else {
-          var playheadSeconds = _engineController.currentSeconds;
+          var playheadSeconds = _effectiveCurrentSeconds;
           final atTimelineEnd = _engineController.durationSeconds > 0 &&
               playheadSeconds >=
                   (_engineController.durationSeconds -
@@ -684,7 +688,10 @@ class _MobileEditorScreenState extends State<MobileEditorScreen> {
               }
             }
           }
-          final localSeconds = node?.sourcePositionSeconds ?? playheadSeconds;
+          final localSeconds =
+              resolvedPlayback?.sourcePositionSeconds ??
+                  node?.sourcePositionSeconds ??
+                  playheadSeconds;
           await _engineController.play();
           await _previewBackend.syncTransport(
             positionSeconds: localSeconds,
@@ -1503,10 +1510,12 @@ class _ResolvedPreviewPlayback {
     required this.targetSource,
     required this.upcomingSource,
     required this.activeBaseClipIds,
+    required this.sourcePositionSeconds,
   });
 
   final MockAssetItem asset;
   final PreviewSource targetSource;
   final PreviewSource? upcomingSource;
   final List<String> activeBaseClipIds;
+  final double sourcePositionSeconds;
 }

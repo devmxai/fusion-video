@@ -81,4 +81,5 @@ preBuild.dependsOn(tasks.named("buildFusionVideoEngine"))
 
 dependencies {
     implementation "androidx.multidex:multidex:2.0.1"
+    testImplementation "junit:junit:4.13.2"
 }
