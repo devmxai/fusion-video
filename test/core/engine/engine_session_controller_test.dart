@@ -287,6 +287,51 @@ void main() {
     controller.dispose();
   });
 
+  test('split delete keeps remaining source order deterministic', () async {
+    final controller = buildController();
+
+    await controller.initialize();
+    await controller.importAsset(
+      const EngineAssetDescriptor(
+        id: 'video-1',
+        uri: '/tmp/video-1.mp4',
+        kind: EngineTrackKind.video,
+        durationSeconds: 4.0,
+      ),
+    );
+    await controller.insertClip(
+      trackKind: EngineTrackKind.video,
+      clipId: 'video-1',
+      assetId: 'video-1',
+      durationSeconds: 4.0,
+    );
+
+    await controller.seekSeconds(1.0);
+    await settleEngine();
+    await controller.splitSelectedClip();
+
+    controller.selectClip(controller.tracks.first.clips[1].id);
+    await controller.seekSeconds(2.5);
+    await settleEngine();
+    await controller.splitSelectedClip();
+
+    final splitClips = controller.tracks.first.clips;
+    expect(splitClips, hasLength(3));
+
+    controller.selectClip(splitClips[1].id);
+    await controller.deleteSelectedClip();
+
+    final remainingClips = controller.tracks.first.clips;
+    expect(remainingClips, hasLength(2));
+    expect(remainingClips[0].sourceOffsetSeconds, closeTo(0.0, 0.001));
+    expect(remainingClips[0].duration, closeTo(1.0, 0.001));
+    expect(remainingClips[1].sourceOffsetSeconds, closeTo(2.5, 0.001));
+    expect(remainingClips[1].duration, closeTo(1.5, 0.001));
+
+    await controller.shutdown();
+    controller.dispose();
+  });
+
   test('visual binding resolves local media time after split and trim',
       () async {
     final controller = buildController();
@@ -491,6 +536,48 @@ void main() {
     expect(nodes, hasLength(1));
     expect(nodes.first.gain, closeTo(0.35, 0.001));
     expect(nodes.first.isMuted, isTrue);
+
+    await controller.shutdown();
+    controller.dispose();
+  });
+
+  test('deleting the left split segment keeps the remaining source offset',
+      () async {
+    final controller = buildController();
+
+    await controller.initialize();
+    await controller.importAsset(
+      const EngineAssetDescriptor(
+        id: 'video-1',
+        uri: '/tmp/video-1.mp4',
+        kind: EngineTrackKind.video,
+        durationSeconds: 4.0,
+      ),
+    );
+    await controller.insertClip(
+      trackKind: EngineTrackKind.video,
+      clipId: 'video-1',
+      assetId: 'video-1',
+      durationSeconds: 4.0,
+    );
+
+    await controller.seekSeconds(2.0);
+    await settleEngine();
+    await controller.splitSelectedClip();
+
+    final leftClipId = controller.tracks.first.clips.first.id;
+    controller.selectClip(leftClipId);
+    await controller.deleteSelectedClip();
+
+    final clips = controller.tracks.first.clips;
+    expect(clips, hasLength(1));
+    expect(clips.first.duration, closeTo(2.0, 0.001));
+    expect(clips.first.sourceOffsetSeconds, closeTo(2.0, 0.001));
+
+    final nodes = await controller.compositionAt(0);
+    expect(nodes, hasLength(1));
+    expect(nodes.first.sourceStartSeconds, closeTo(2.0, 0.001));
+    expect(nodes.first.sourcePositionSeconds, closeTo(2.0, 0.001));
 
     await controller.shutdown();
     controller.dispose();

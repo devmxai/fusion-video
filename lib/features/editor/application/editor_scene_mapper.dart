@@ -177,6 +177,7 @@ class EditorSceneMapper {
     }
 
     return current.id != target.id ||
+        current.effectiveAttachmentId != target.effectiveAttachmentId ||
         current.localPath != target.localPath ||
         current.kind != target.kind ||
         (current.sourceStartSeconds - target.sourceStartSeconds).abs() >
@@ -205,6 +206,11 @@ class EditorSceneMapper {
   ) {
     if (current == null) {
       return false;
+    }
+
+    if (current.attachmentId != null || target.attachmentId != null) {
+      return current.effectiveAttachmentId == target.effectiveAttachmentId &&
+          current.kind == target.kind;
     }
 
     return current.localPath == target.localPath && current.kind == target.kind;

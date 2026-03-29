@@ -139,6 +139,35 @@ void main() {
     expect(sameStream, isTrue);
   });
 
+  test('treats different attachment ids as different playback streams', () {
+    const current = PreviewSource(
+      id: 'group-a',
+      attachmentId: 'group-a',
+      assetId: 'asset-1',
+      kind: PreviewSourceKind.video,
+      localPath: '/tmp/a.mp4',
+      sourceStartSeconds: 0,
+      sourceEndSeconds: 1,
+      clipDurationSeconds: 1,
+    );
+    const target = PreviewSource(
+      id: 'group-b',
+      attachmentId: 'group-b',
+      assetId: 'asset-1',
+      kind: PreviewSourceKind.video,
+      localPath: '/tmp/a.mp4',
+      sourceStartSeconds: 2,
+      sourceEndSeconds: 3,
+      clipDurationSeconds: 1,
+    );
+
+    expect(EditorSceneMapper.isSamePreviewStream(current, target), isFalse);
+    expect(
+      EditorSceneMapper.shouldAttachPreviewSource(current, target),
+      isTrue,
+    );
+  });
+
   test('tracks upcoming preview source changes when nullability changes', () {
     const current = PreviewSource(
       id: 'clip-1',

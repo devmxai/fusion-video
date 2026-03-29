@@ -57,7 +57,7 @@ class _TimelinePanelState extends State<TimelinePanel> {
   static const double _rowGap = 6;
   static const double _controlTileSize = 36;
   static const double _controlGap = 6;
-  static const double _splitGap = 2;
+  static const double _splitGap = 0;
   static const double _trailingPadding = 120;
   static const double _timeReadoutWidth = 96;
   static const double _minSecondsWidth = 92;
@@ -184,7 +184,24 @@ class _TimelinePanelState extends State<TimelinePanel> {
     final nextSeconds =
         (offset / _secondsWidth).clamp(0, widget.timelineDuration).toDouble();
 
-    if ((nextSeconds - widget.currentSeconds).abs() <= 0.002) {
+    _dispatchTimelineSeconds(nextSeconds);
+  }
+
+  void _flushPendingScrollSeconds() {
+    _scrollDispatchTimer?.cancel();
+    _scrollDispatchTimer = null;
+    final nextSeconds = _pendingSeconds;
+    _pendingSeconds = null;
+    if (nextSeconds == null) {
+      return;
+    }
+    _lastDispatchedAt = DateTime.now();
+    widget.onTimeChanged(nextSeconds);
+  }
+
+  void _dispatchTimelineSeconds(double nextSeconds) {
+    if ((nextSeconds - widget.currentSeconds).abs() <= 0.002 &&
+        _pendingSeconds == null) {
       return;
     }
 
@@ -200,18 +217,6 @@ class _TimelinePanelState extends State<TimelinePanel> {
     _pendingSeconds = nextSeconds;
     _scrollDispatchTimer ??=
         Timer(const Duration(milliseconds: 16), _flushPendingScrollSeconds);
-  }
-
-  void _flushPendingScrollSeconds() {
-    _scrollDispatchTimer?.cancel();
-    _scrollDispatchTimer = null;
-    final nextSeconds = _pendingSeconds;
-    _pendingSeconds = null;
-    if (nextSeconds == null) {
-      return;
-    }
-    _lastDispatchedAt = DateTime.now();
-    widget.onTimeChanged(nextSeconds);
   }
 
   void _setScrubInteractionActive(bool isActive) {
@@ -239,9 +244,10 @@ class _TimelinePanelState extends State<TimelinePanel> {
       return;
     }
 
-    final nextSeconds = (_backgroundScrubCurrentSeconds - (deltaDx / _secondsWidth))
-        .clamp(0.0, widget.timelineDuration)
-        .toDouble();
+    final nextSeconds =
+        (_backgroundScrubCurrentSeconds - (deltaDx / _secondsWidth))
+            .clamp(0.0, widget.timelineDuration)
+            .toDouble();
     _backgroundScrubCurrentSeconds = nextSeconds;
 
     if (_scrollController.hasClients) {
@@ -253,7 +259,7 @@ class _TimelinePanelState extends State<TimelinePanel> {
       _isSyncingFromExternal = false;
     }
 
-    widget.onTimeChanged(nextSeconds);
+    _dispatchTimelineSeconds(nextSeconds);
   }
 
   void _endBackgroundScrub() {
@@ -295,10 +301,10 @@ class _TimelinePanelState extends State<TimelinePanel> {
     _rawScrubDy += event.delta.dy.abs();
 
     if (!_rawScrubLocked) {
-      if (_rawScrubDx < 4) {
+      if (_rawScrubDx < 2.5) {
         return;
       }
-      if (_rawScrubDx <= _rawScrubDy + 2) {
+      if (_rawScrubDx <= _rawScrubDy + 1) {
         return;
       }
       _rawScrubLocked = true;
@@ -928,10 +934,10 @@ class _TimelinePanelState extends State<TimelinePanel> {
                                                         i,
                                                         clip,
                                                       ),
-                                                      onBackgroundTap:
-                                                          widget.onBackgroundTap,
-                                                      assetPathResolver:
-                                                          widget.assetPathResolver,
+                                                      onBackgroundTap: widget
+                                                          .onBackgroundTap,
+                                                      assetPathResolver: widget
+                                                          .assetPathResolver,
                                                     ),
                                                     if (i !=
                                                         widget.tracks.length -

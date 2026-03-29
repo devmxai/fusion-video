@@ -4,6 +4,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 
 import '../../application/editor_media_support.dart';
+import '../../application/clip_junction_resolver.dart';
 import '../../application/editor_scene_mapper.dart';
 import '../../../../core/engine/engine_contract.dart';
 import '../../../../core/engine/engine_session_controller.dart';
@@ -34,6 +35,8 @@ class MobileEditorScreen extends StatefulWidget {
 
 class _MobileEditorScreenState extends State<MobileEditorScreen> {
   static const double _initialProjectDuration = 0;
+  static const double _previewSceneLeadSeconds = 1 / 30;
+  static const double _timelineEndEpsilonSeconds = 1 / 30;
 
   EditorMediaTab activeTab = EditorMediaTab.video;
   late final FusionVideoEngineSessionController _engineController;
@@ -50,6 +53,11 @@ class _MobileEditorScreenState extends State<MobileEditorScreen> {
   Timer? _previewSeekDebounce;
   double? _pendingPreviewSeekSeconds;
   bool _previewSeekInFlight = false;
+  bool _previewSceneSyncInFlight = false;
+  bool _previewSceneSyncQueued = false;
+  Future<void>? _previewSceneSyncFuture;
+  bool _isTogglingPlayback = false;
+  double? _timelinePreviewSeconds;
 
   @override
   void initState() {
@@ -124,6 +132,65 @@ class _MobileEditorScreenState extends State<MobileEditorScreen> {
     );
   }
 
+  _ResolvedPreviewPlayback? _resolvePreviewPlayback(
+    EngineCompositionNodeSnapshot targetNode,
+  ) {
+    final targetDescriptor = _engineController.assetForId(targetNode.assetId) ??
+        EngineAssetDescriptor(
+          id: targetNode.assetId,
+          uri: targetNode.assetUri,
+          kind: targetNode.trackKind,
+          label: targetNode.displayLabel,
+        );
+    final targetAsset = _assetFromDescriptor(targetDescriptor);
+    if (targetAsset == null || !targetAsset.isVisual) {
+      return null;
+    }
+
+    final playbackResolution = ClipJunctionResolver.resolvePlayback(
+      targetNode: targetNode,
+      tracks: _engineController.tracks,
+      assetResolver: (assetId) {
+        return _engineController.assetForId(assetId) ??
+            (assetId == targetNode.assetId ? targetDescriptor : null);
+      },
+      isPlaying: _engineController.isPlaying,
+    );
+
+    return _ResolvedPreviewPlayback(
+      asset: targetAsset,
+      targetSource:
+          playbackResolution?.activeSource ?? _previewSourceForNode(targetNode),
+      upcomingSource: playbackResolution?.upcomingSource,
+      activeBaseClipIds:
+          playbackResolution?.activeClipIds ?? <String>[targetNode.clipId],
+    );
+  }
+
+  double? _localPreviewSeekSecondsForProjectTime(double projectSeconds) {
+    final currentSource = _previewBackend.state.source;
+    final binding = _engineController.activeVisualBindingAt(projectSeconds);
+    if (currentSource == null || binding == null) {
+      return null;
+    }
+
+    final bindingKind = binding.asset.kind == EngineTrackKind.video
+        ? PreviewSourceKind.video
+        : PreviewSourceKind.image;
+    if (currentSource.localPath != binding.asset.uri ||
+        currentSource.kind != bindingKind) {
+      return null;
+    }
+
+    final currentSourceEnd = currentSource.sourceEndSeconds ?? double.infinity;
+    if (binding.sourceStartSeconds < currentSource.sourceStartSeconds - 0.001 ||
+        binding.sourceEndSeconds > currentSourceEnd + 0.001) {
+      return null;
+    }
+
+    return binding.sourcePositionSeconds;
+  }
+
   Future<void> _syncPreviewFromEngineState() async {
     final targetNode = await _currentPreviewNode();
     _audioNodes = await _engineController.audioNodesAt(
@@ -140,6 +207,30 @@ class _MobileEditorScreenState extends State<MobileEditorScreen> {
         }
       }
     }
+    final currentSource = _previewBackend.state.source;
+    if (targetNode == null) {
+      _compositionNodes = const <EngineCompositionNodeSnapshot>[];
+      _previewAssetId = null;
+      await _previewBackend.updateCompositionScene(
+        projectWidth: _engineController.projectWidth,
+        projectHeight: _engineController.projectHeight,
+        nodes: const <PreviewCompositionNode>[],
+        audioNodes: const <PreviewAudioNode>[],
+        baseClipIds: const <String>[],
+        selectedClipId: _engineController.selectedClipId,
+      );
+      if (currentSource != null) {
+        await _previewBackend.attachSource(null);
+      }
+      return;
+    }
+
+    final resolvedPlayback = _resolvePreviewPlayback(targetNode);
+    if (resolvedPlayback == null) {
+      return;
+    }
+    final targetAsset = resolvedPlayback.asset;
+    final activeBaseClipIds = resolvedPlayback.activeBaseClipIds;
     await _previewBackend.updateCompositionScene(
       projectWidth: _engineController.projectWidth,
       projectHeight: _engineController.projectHeight,
@@ -148,36 +239,14 @@ class _MobileEditorScreenState extends State<MobileEditorScreen> {
         assetLabelResolver: (assetId) => _findAssetById(assetId)?.label,
       ),
       audioNodes: EditorSceneMapper.previewAudioNodes(_audioNodes),
-      baseClipId: targetNode?.clipId,
+      baseClipId: activeBaseClipIds.first,
+      baseClipIds: activeBaseClipIds,
       selectedClipId: _engineController.selectedClipId,
       baseAudioGain: baseAudioNode?.gain ?? 1,
       baseAudioMuted: baseAudioNode?.isMuted ?? false,
     );
-
-    final currentSource = _previewBackend.state.source;
-    if (targetNode == null) {
-      _compositionNodes = const <EngineCompositionNodeSnapshot>[];
-      _previewAssetId = null;
-      if (currentSource != null) {
-        await _previewBackend.attachSource(null);
-      }
-      return;
-    }
-
-    final targetDescriptor = _engineController.assetForId(targetNode.assetId) ??
-        EngineAssetDescriptor(
-          id: targetNode.assetId,
-          uri: targetNode.assetUri,
-          kind: targetNode.trackKind,
-          label: targetNode.displayLabel,
-        );
-    final targetAsset = _assetFromDescriptor(targetDescriptor);
-    if (targetAsset == null || !targetAsset.isVisual) {
-      return;
-    }
-
-    final targetSource = _previewSourceForNode(targetNode);
-    final upcomingSource = await _upcomingPreviewSourceForNode(targetNode);
+    final targetSource = resolvedPlayback.targetSource;
+    final upcomingSource = resolvedPlayback.upcomingSource;
     final samePreviewStream = EditorSceneMapper.isSamePreviewStream(
       currentSource,
       targetSource,
@@ -211,12 +280,16 @@ class _MobileEditorScreenState extends State<MobileEditorScreen> {
 
     final previewState = _previewBackend.state;
     final localPositionSeconds = targetNode.sourcePositionSeconds;
+    final positionDelta =
+        (previewState.positionSeconds - localPositionSeconds).abs();
+    final pausedTransportNeedsSync = !_engineController.isPlaying &&
+        (previewState.isPlaying || positionDelta > 0.034);
     final shouldForce = (didAttachSource && !samePreviewStream) ||
-        (!_engineController.isPlaying && !_isTimelineScrubbing);
+        previewState.isPlaying != _engineController.isPlaying;
     final shouldSyncTransport = (didAttachSource &&
             (!samePreviewStream || !_engineController.isPlaying)) ||
         _engineController.isPlaying != previewState.isPlaying ||
-        !_engineController.isPlaying;
+        pausedTransportNeedsSync;
     if (shouldSyncTransport) {
       await _previewBackend.syncTransport(
         positionSeconds: localPositionSeconds,
@@ -226,34 +299,33 @@ class _MobileEditorScreenState extends State<MobileEditorScreen> {
     }
   }
 
-  Future<PreviewSource?> _upcomingPreviewSourceForNode(
-    EngineCompositionNodeSnapshot targetNode,
-  ) async {
-    const previewLookaheadEpsilon = 0.001;
-    final nextProjectSeconds =
-        targetNode.clipEndSeconds + previewLookaheadEpsilon;
-    if (nextProjectSeconds > _engineController.durationSeconds + 0.0001) {
-      return null;
+  Future<void> _schedulePreviewSceneSync() {
+    _previewSceneSyncQueued = true;
+    final inFlight = _previewSceneSyncFuture;
+    if (inFlight != null) {
+      return inFlight;
     }
 
-    final upcomingNodes = await _engineController.compositionAt(
-      nextProjectSeconds.clamp(0.0, _engineController.durationSeconds),
-    );
-    final upcomingNode = EditorSceneMapper.resolveBasePreviewNode(
-      upcomingNodes,
-      isPlaying: _engineController.isPlaying,
-      selectedClipId: _engineController.selectedClipId,
-    );
-    if (upcomingNode == null || upcomingNode.clipId == targetNode.clipId) {
-      return null;
+    final future = _drainPreviewSceneSyncQueue();
+    _previewSceneSyncFuture = future;
+    return future;
+  }
+
+  Future<void> _drainPreviewSceneSyncQueue() async {
+    if (_previewSceneSyncInFlight) {
+      return;
     }
 
-    final currentSource = _previewSourceForNode(targetNode);
-    final upcomingSource = _previewSourceForNode(upcomingNode);
-    if (EditorSceneMapper.isSamePreviewStream(currentSource, upcomingSource)) {
-      return null;
+    _previewSceneSyncInFlight = true;
+    try {
+      while (_previewSceneSyncQueued) {
+        _previewSceneSyncQueued = false;
+        await _syncPreviewFromEngineState();
+      }
+    } finally {
+      _previewSceneSyncInFlight = false;
+      _previewSceneSyncFuture = null;
     }
-    return upcomingSource;
   }
 
   @override
@@ -275,8 +347,19 @@ class _MobileEditorScreenState extends State<MobileEditorScreen> {
     if (handle != null) {
       unawaited(_previewBackend.bindProject(handle.id));
     }
-    if (!_isApplyingTimelineEdit && _shouldRefreshPreviewScene()) {
-      unawaited(_syncPreviewFromEngineState());
+    final timelinePreviewSeconds = _timelinePreviewSeconds;
+    if (timelinePreviewSeconds != null) {
+      final didCatchUp =
+          (_engineController.currentSeconds - timelinePreviewSeconds).abs() <=
+              0.05;
+      if (!_isTimelineScrubbing || _engineController.isPlaying || didCatchUp) {
+        _timelinePreviewSeconds = null;
+      }
+    }
+    if (!_isApplyingTimelineEdit &&
+        !_isTogglingPlayback &&
+        _shouldRefreshPreviewScene()) {
+      unawaited(_schedulePreviewSceneSync());
     }
     if (!mounted) {
       return;
@@ -292,11 +375,16 @@ class _MobileEditorScreenState extends State<MobileEditorScreen> {
     if (_previewBackend.state.isPlaying != _engineController.isPlaying) {
       return true;
     }
-    if (_previewBackend.state.selectedClipId !=
-        _engineController.selectedClipId) {
+    if (!_engineController.isPlaying &&
+        _previewBackend.state.selectedClipId !=
+            _engineController.selectedClipId) {
       return true;
     }
-    return !_cachedSceneCoversSecond(_engineController.currentSeconds);
+    final probeSeconds =
+        (_engineController.currentSeconds + _previewSceneLeadSeconds)
+            .clamp(0.0, _engineController.durationSeconds)
+            .toDouble();
+    return !_cachedSceneCoversSecond(probeSeconds);
   }
 
   bool _cachedSceneCoversSecond(double seconds) {
@@ -392,13 +480,56 @@ class _MobileEditorScreenState extends State<MobileEditorScreen> {
   }
 
   void _setCurrentSeconds(double value) {
+    _timelinePreviewSeconds = value;
+    if (mounted) {
+      setState(() {});
+    }
     unawaited(_engineController.seekSeconds(value));
     final previewState = _previewBackend.state;
     if (previewState.isReady && !previewState.isPlaying) {
+      final localSeekSeconds = _localPreviewSeekSecondsForProjectTime(value);
+      if (localSeekSeconds != null) {
+        _schedulePreviewSeek(
+          localSeekSeconds,
+          immediate: !_isTimelineScrubbing,
+        );
+        return;
+      }
       unawaited(() async {
         final node = await _currentPreviewNode(projectSeconds: value);
         if (node == null) {
           return;
+        }
+        final resolvedPlayback = _resolvePreviewPlayback(node);
+        if (resolvedPlayback != null) {
+          final currentSource = _previewBackend.state.source;
+          final didAttachSource = EditorSceneMapper.shouldAttachPreviewSource(
+            currentSource,
+            resolvedPlayback.targetSource,
+          );
+          final didChangeUpcomingSource =
+              EditorSceneMapper.hasPreviewSourceChanged(
+            _previewBackend.state.upcomingSource,
+            resolvedPlayback.upcomingSource,
+          );
+          if (didAttachSource || didChangeUpcomingSource) {
+            final samePreviewStream = EditorSceneMapper.isSamePreviewStream(
+              currentSource,
+              resolvedPlayback.targetSource,
+            );
+            if (didAttachSource && samePreviewStream) {
+              await _previewBackend.updateSource(
+                resolvedPlayback.targetSource,
+                upcomingSource: resolvedPlayback.upcomingSource,
+              );
+            } else {
+              await _activatePreviewForAsset(
+                resolvedPlayback.asset,
+                previewSource: resolvedPlayback.targetSource,
+                upcomingSource: resolvedPlayback.upcomingSource,
+              );
+            }
+          }
         }
         _schedulePreviewSeek(
           node.sourcePositionSeconds,
@@ -415,7 +546,7 @@ class _MobileEditorScreenState extends State<MobileEditorScreen> {
       return;
     }
     _previewSeekDebounce ??= Timer(
-      Duration(milliseconds: _isTimelineScrubbing ? 48 : 16),
+      const Duration(milliseconds: 16),
       _flushPreviewSeek,
     );
   }
@@ -453,7 +584,7 @@ class _MobileEditorScreenState extends State<MobileEditorScreen> {
   }
 
   double get _effectiveCurrentSeconds {
-    return _engineController.currentSeconds;
+    return _timelinePreviewSeconds ?? _engineController.currentSeconds;
   }
 
   bool get _effectiveIsPlaying {
@@ -497,31 +628,75 @@ class _MobileEditorScreenState extends State<MobileEditorScreen> {
   Future<void> _togglePlayback() async {
     final previewState = _previewBackend.state;
     if (previewState.isReady) {
-      if (previewState.isPlaying) {
-        final node = await _currentPreviewNode();
-        final localSeconds =
-            node?.sourcePositionSeconds ?? previewState.positionSeconds;
-        await _engineController.pause();
-        await _previewBackend.syncTransport(
-          positionSeconds: localSeconds,
-          isPlaying: false,
-          force: true,
-        );
-      } else {
-        var playheadSeconds = _engineController.currentSeconds;
-        if (previewState.durationSeconds > 0 &&
-            previewState.positionSeconds >= previewState.durationSeconds) {
-          await _engineController.seekSeconds(0);
-          playheadSeconds = 0;
+      _isTogglingPlayback = true;
+      try {
+        if (previewState.isPlaying) {
+          final node = await _currentPreviewNode();
+          final localSeconds =
+              node?.sourcePositionSeconds ?? previewState.positionSeconds;
+          await _engineController.pause();
+          await _previewBackend.syncTransport(
+            positionSeconds: localSeconds,
+            isPlaying: false,
+            force: true,
+          );
+        } else {
+          var playheadSeconds = _engineController.currentSeconds;
+          final atTimelineEnd = _engineController.durationSeconds > 0 &&
+              playheadSeconds >=
+                  (_engineController.durationSeconds -
+                      _timelineEndEpsilonSeconds);
+          if (atTimelineEnd) {
+            await _engineController.seekSeconds(0);
+            playheadSeconds = 0;
+          }
+          final node =
+              await _currentPreviewNode(projectSeconds: playheadSeconds);
+          final resolvedPlayback =
+              node == null ? null : _resolvePreviewPlayback(node);
+          if (resolvedPlayback != null) {
+            final currentSource = _previewBackend.state.source;
+            final didAttachSource = EditorSceneMapper.shouldAttachPreviewSource(
+              currentSource,
+              resolvedPlayback.targetSource,
+            );
+            final didChangeUpcomingSource =
+                EditorSceneMapper.hasPreviewSourceChanged(
+              _previewBackend.state.upcomingSource,
+              resolvedPlayback.upcomingSource,
+            );
+            if (didAttachSource || didChangeUpcomingSource) {
+              final samePreviewStream = EditorSceneMapper.isSamePreviewStream(
+                currentSource,
+                resolvedPlayback.targetSource,
+              );
+              if (didAttachSource && samePreviewStream) {
+                await _previewBackend.updateSource(
+                  resolvedPlayback.targetSource,
+                  upcomingSource: resolvedPlayback.upcomingSource,
+                );
+              } else {
+                await _activatePreviewForAsset(
+                  resolvedPlayback.asset,
+                  previewSource: resolvedPlayback.targetSource,
+                  upcomingSource: resolvedPlayback.upcomingSource,
+                );
+              }
+            }
+          }
+          final localSeconds = node?.sourcePositionSeconds ?? playheadSeconds;
+          await _engineController.play();
+          await _previewBackend.syncTransport(
+            positionSeconds: localSeconds,
+            isPlaying: true,
+            force: true,
+          );
         }
-        final node = await _currentPreviewNode(projectSeconds: playheadSeconds);
-        final localSeconds = node?.sourcePositionSeconds ?? playheadSeconds;
-        await _engineController.play();
-        await _previewBackend.syncTransport(
-          positionSeconds: localSeconds,
-          isPlaying: true,
-          force: true,
-        );
+      } finally {
+        _isTogglingPlayback = false;
+        if (_shouldRefreshPreviewScene()) {
+          await _schedulePreviewSceneSync();
+        }
       }
       if (mounted) {
         setState(() {});
@@ -545,9 +720,7 @@ class _MobileEditorScreenState extends State<MobileEditorScreen> {
         debugPrintStack(stackTrace: stackTrace);
       } finally {
         _isApplyingTimelineEdit = false;
-        if (_shouldRefreshPreviewScene()) {
-          await _syncPreviewFromEngineState();
-        }
+        await _schedulePreviewSceneSync();
         if (mounted) {
           setState(() {});
         }
@@ -626,6 +799,12 @@ class _MobileEditorScreenState extends State<MobileEditorScreen> {
     _isTimelineScrubbing = isActive;
     if (!isActive) {
       _flushPreviewSeek();
+      final timelinePreviewSeconds = _timelinePreviewSeconds;
+      if (timelinePreviewSeconds != null &&
+          (timelinePreviewSeconds - _engineController.currentSeconds).abs() <=
+              0.05) {
+        _timelinePreviewSeconds = null;
+      }
     }
   }
 
@@ -1316,4 +1495,18 @@ class _MobileEditorScreenState extends State<MobileEditorScreen> {
       ),
     );
   }
+}
+
+class _ResolvedPreviewPlayback {
+  const _ResolvedPreviewPlayback({
+    required this.asset,
+    required this.targetSource,
+    required this.upcomingSource,
+    required this.activeBaseClipIds,
+  });
+
+  final MockAssetItem asset;
+  final PreviewSource targetSource;
+  final PreviewSource? upcomingSource;
+  final List<String> activeBaseClipIds;
 }

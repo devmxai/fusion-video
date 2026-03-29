@@ -120,6 +120,7 @@ class PreviewSource {
     required this.assetId,
     required this.kind,
     required this.localPath,
+    this.attachmentId,
     this.clipStartSeconds = 0,
     this.clipEndSeconds,
     this.durationSeconds,
@@ -134,6 +135,7 @@ class PreviewSource {
   final String assetId;
   final PreviewSourceKind kind;
   final String localPath;
+  final String? attachmentId;
   final double clipStartSeconds;
   final double? clipEndSeconds;
   final double? durationSeconds;
@@ -142,6 +144,8 @@ class PreviewSource {
   final double sourceStartSeconds;
   final double? sourceEndSeconds;
   final double? clipDurationSeconds;
+
+  String get effectiveAttachmentId => attachmentId ?? id;
 
   double? get effectiveDurationSeconds =>
       clipDurationSeconds ?? sourceEndSeconds ?? durationSeconds;
@@ -163,11 +167,13 @@ class PreviewBackendState {
     this.projectWidth,
     this.projectHeight,
     this.baseClipId,
+    this.baseClipIds = const <String>[],
     this.selectedClipId,
     this.baseAudioGain = 1,
     this.baseAudioMuted = false,
     this.isReady = false,
     this.isPlaying = false,
+    this.transportRevision = 0,
     this.positionSeconds = 0,
     this.durationSeconds = 0,
     this.contentSize,
@@ -180,11 +186,13 @@ class PreviewBackendState {
   final int? projectWidth;
   final int? projectHeight;
   final String? baseClipId;
+  final List<String> baseClipIds;
   final String? selectedClipId;
   final double baseAudioGain;
   final bool baseAudioMuted;
   final bool isReady;
   final bool isPlaying;
+  final int transportRevision;
   final double positionSeconds;
   final double durationSeconds;
   final Size? contentSize;
@@ -208,12 +216,14 @@ class PreviewBackendState {
     int? projectHeight,
     String? baseClipId,
     bool clearBaseClipId = false,
+    List<String>? baseClipIds,
     String? selectedClipId,
     bool clearSelectedClipId = false,
     double? baseAudioGain,
     bool? baseAudioMuted,
     bool? isReady,
     bool? isPlaying,
+    int? transportRevision,
     double? positionSeconds,
     double? durationSeconds,
     Size? contentSize,
@@ -228,12 +238,16 @@ class PreviewBackendState {
       projectWidth: projectWidth ?? this.projectWidth,
       projectHeight: projectHeight ?? this.projectHeight,
       baseClipId: clearBaseClipId ? null : (baseClipId ?? this.baseClipId),
+      baseClipIds: clearBaseClipId
+          ? const <String>[]
+          : (baseClipIds ?? this.baseClipIds),
       selectedClipId:
           clearSelectedClipId ? null : (selectedClipId ?? this.selectedClipId),
       baseAudioGain: baseAudioGain ?? this.baseAudioGain,
       baseAudioMuted: baseAudioMuted ?? this.baseAudioMuted,
       isReady: isReady ?? this.isReady,
       isPlaying: isPlaying ?? this.isPlaying,
+      transportRevision: transportRevision ?? this.transportRevision,
       positionSeconds: positionSeconds ?? this.positionSeconds,
       durationSeconds: durationSeconds ?? this.durationSeconds,
       contentSize: clearContentSize ? null : (contentSize ?? this.contentSize),
@@ -269,6 +283,7 @@ abstract class FusionPreviewBackend extends ChangeNotifier {
     required List<PreviewCompositionNode> nodes,
     required List<PreviewAudioNode> audioNodes,
     String? baseClipId,
+    List<String>? baseClipIds,
     String? selectedClipId,
     double baseAudioGain = 1,
     bool baseAudioMuted = false,

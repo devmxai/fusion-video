@@ -389,7 +389,8 @@ impl ProjectState {
             }
 
             let mut elapsed = 0.0;
-            for clip in &track.clips {
+            let clip_count = track.clips.len();
+            for (clip_index, clip) in track.clips.iter().enumerate() {
                 let start_seconds = elapsed;
                 let end_seconds = start_seconds + clip.duration_seconds;
                 elapsed = end_seconds;
@@ -397,7 +398,12 @@ impl ProjectState {
                 if clip.clip_type != ClipType::Media {
                     continue;
                 }
-                if seconds < start_seconds || seconds > end_seconds + 0.0001 {
+                if !clip_contains_seconds(
+                    seconds,
+                    start_seconds,
+                    end_seconds,
+                    clip_index + 1 == clip_count,
+                ) {
                     continue;
                 }
 
@@ -471,7 +477,8 @@ impl ProjectState {
             }
 
             let mut elapsed = 0.0;
-            for clip in &track.clips {
+            let clip_count = track.clips.len();
+            for (clip_index, clip) in track.clips.iter().enumerate() {
                 let start_seconds = elapsed;
                 let end_seconds = start_seconds + clip.duration_seconds;
                 elapsed = end_seconds;
@@ -479,7 +486,12 @@ impl ProjectState {
                 if clip.clip_type != ClipType::Media {
                     continue;
                 }
-                if seconds < start_seconds || seconds > end_seconds + 0.0001 {
+                if !clip_contains_seconds(
+                    seconds,
+                    start_seconds,
+                    end_seconds,
+                    clip_index + 1 == clip_count,
+                ) {
                     continue;
                 }
 
@@ -573,6 +585,23 @@ fn audio_envelope_at(
     let fade_in = (distance_from_start / fade_duration_seconds).clamp(0.0, 1.0);
     let fade_out = (distance_to_end / fade_duration_seconds).clamp(0.0, 1.0);
     fade_in.min(fade_out)
+}
+
+fn clip_contains_seconds(
+    seconds: f64,
+    clip_start_seconds: f64,
+    clip_end_seconds: f64,
+    is_terminal_clip: bool,
+) -> bool {
+    if seconds < clip_start_seconds {
+        return false;
+    }
+
+    if is_terminal_clip {
+        return seconds <= clip_end_seconds + 0.0001;
+    }
+
+    seconds < clip_end_seconds
 }
 
 impl Default for ProjectState {
@@ -722,6 +751,28 @@ mod tests {
     }
 
     #[test]
+    fn split_seam_exposes_only_right_segment_for_composition_snapshot() {
+        let mut project = project();
+        project.import_asset(AssetState {
+            id: "video-1".into(),
+            uri: "/tmp/video-1.mp4".into(),
+            kind: TrackKind::Video,
+            label: Some("video-1.mp4".into()),
+            duration_seconds: Some(4.0),
+            width: Some(1080),
+            height: Some(1920),
+        });
+
+        assert!(project.insert_clip(TrackKind::Video, "video-1", "video-1", 4.0, true));
+        assert!(project.split_clip("video-1", 1.5));
+
+        let nodes = project.composition_nodes_at(1.5);
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].clip_id, "video-1_b_1");
+        assert!((nodes[0].source_start_seconds - 1.5).abs() < 0.001);
+    }
+
+    #[test]
     fn audio_snapshot_resolves_clip_source_offsets() {
         let mut project = project();
         project.import_asset(AssetState {
@@ -747,6 +798,28 @@ mod tests {
         assert!((node.source_start_seconds - 2.0).abs() < 0.001);
         assert!((node.source_position_seconds - 3.5).abs() < 0.001);
         assert!((node.source_end_seconds - 6.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn split_seam_exposes_only_right_segment_for_audio_snapshot() {
+        let mut project = project();
+        project.import_asset(AssetState {
+            id: "audio-1".into(),
+            uri: "/tmp/audio-1.m4a".into(),
+            kind: TrackKind::Audio,
+            label: Some("audio-1.m4a".into()),
+            duration_seconds: Some(6.0),
+            width: None,
+            height: None,
+        });
+
+        assert!(project.insert_clip(TrackKind::Audio, "audio-1", "audio-1", 6.0, true));
+        assert!(project.split_clip("audio-1", 2.0));
+
+        let nodes = project.audio_nodes_at(2.0);
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].clip_id, "audio-1_b_1");
+        assert!((nodes[0].source_start_seconds - 2.0).abs() < 0.001);
     }
 
     #[test]

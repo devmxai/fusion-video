@@ -59,8 +59,11 @@ class MainActivity : FlutterActivity() {
             val projectId = (args?.get("projectId") as? Number)?.toInt()
             val positionSeconds = (args?.get("positionSeconds") as? Number)?.toDouble()
             val isPlaying = args?.get("isPlaying") as? Boolean
+            val transportRevision = (args?.get("transportRevision") as? Number)?.toInt() ?: 0
+            val sourceId = args?.get("sourceId") as? String
             val sourcePath = args?.get("sourcePath") as? String
             val sourceKind = args?.get("sourceKind") as? String
+            val upcomingSourceId = args?.get("upcomingSourceId") as? String
             val upcomingSourcePath = args?.get("upcomingSourcePath") as? String
             val upcomingSourceKind = args?.get("upcomingSourceKind") as? String
             val sourceStartSeconds = (args?.get("sourceStartSeconds") as? Number)?.toDouble()
@@ -72,6 +75,8 @@ class MainActivity : FlutterActivity() {
             val projectWidth = (args?.get("projectWidth") as? Number)?.toInt()
             val projectHeight = (args?.get("projectHeight") as? Number)?.toInt()
             val baseClipId = args?.get("baseClipId") as? String
+            val baseClipIds =
+                (args?.get("baseClipIds") as? List<*>)?.mapNotNull { it as? String } ?: emptyList()
             val selectedClipId = args?.get("selectedClipId") as? String
             val sceneNodes = (args?.get("sceneNodes") as? List<*>)
                 ?.mapNotNull { it as? Map<*, *> }
@@ -89,8 +94,11 @@ class MainActivity : FlutterActivity() {
 
             FusionPreviewRegistry.update(
                 projectId,
+                transportRevision,
+                sourceId,
                 sourcePath,
                 sourceKind,
+                upcomingSourceId,
                 upcomingSourcePath,
                 upcomingSourceKind,
                 sourceStartSeconds,
@@ -100,6 +108,7 @@ class MainActivity : FlutterActivity() {
                 projectWidth,
                 projectHeight,
                 baseClipId,
+                baseClipIds,
                 selectedClipId,
                 sceneNodes,
                 positionSeconds,
@@ -303,8 +312,11 @@ private object FusionPreviewRegistry {
         bucket.add(view)
         payloads[projectId]?.let {
             view.update(
+                it.transportRevision,
+                it.sourceId,
                 it.sourcePath,
                 it.sourceKind,
+                it.upcomingSourceId,
                 it.upcomingSourcePath,
                 it.upcomingSourceKind,
                 it.sourceStartSeconds,
@@ -314,6 +326,7 @@ private object FusionPreviewRegistry {
                 it.projectWidth,
                 it.projectHeight,
                 it.baseClipId,
+                it.baseClipIds,
                 it.selectedClipId,
                 it.sceneNodes,
                 it.positionSeconds,
@@ -328,8 +341,11 @@ private object FusionPreviewRegistry {
 
     fun update(
         projectId: Int,
+        transportRevision: Int,
+        sourceId: String?,
         sourcePath: String?,
         sourceKind: String?,
+        upcomingSourceId: String?,
         upcomingSourcePath: String?,
         upcomingSourceKind: String?,
         sourceStartSeconds: Double?,
@@ -339,14 +355,18 @@ private object FusionPreviewRegistry {
         projectWidth: Int?,
         projectHeight: Int?,
         baseClipId: String?,
+        baseClipIds: List<String>,
         selectedClipId: String?,
         sceneNodes: List<Map<String, Any?>>,
         positionSeconds: Double,
         isPlaying: Boolean,
     ) {
         payloads[projectId] = FusionPreviewPayload(
+            transportRevision = transportRevision,
+            sourceId = sourceId,
             sourcePath = sourcePath,
             sourceKind = sourceKind,
+            upcomingSourceId = upcomingSourceId,
             upcomingSourcePath = upcomingSourcePath,
             upcomingSourceKind = upcomingSourceKind,
             sourceStartSeconds = sourceStartSeconds,
@@ -356,6 +376,7 @@ private object FusionPreviewRegistry {
             projectWidth = projectWidth,
             projectHeight = projectHeight,
             baseClipId = baseClipId,
+            baseClipIds = baseClipIds,
             selectedClipId = selectedClipId,
             sceneNodes = sceneNodes,
             positionSeconds = positionSeconds,
@@ -363,8 +384,11 @@ private object FusionPreviewRegistry {
         )
         views[projectId]?.forEach {
             it.update(
+                transportRevision,
+                sourceId,
                 sourcePath,
                 sourceKind,
+                upcomingSourceId,
                 upcomingSourcePath,
                 upcomingSourceKind,
                 sourceStartSeconds,
@@ -374,6 +398,7 @@ private object FusionPreviewRegistry {
                 projectWidth,
                 projectHeight,
                 baseClipId,
+                baseClipIds,
                 selectedClipId,
                 sceneNodes,
                 positionSeconds,
@@ -384,8 +409,11 @@ private object FusionPreviewRegistry {
 }
 
 private data class FusionPreviewPayload(
+    val transportRevision: Int,
+    val sourceId: String?,
     val sourcePath: String?,
     val sourceKind: String?,
+    val upcomingSourceId: String?,
     val upcomingSourcePath: String?,
     val upcomingSourceKind: String?,
     val sourceStartSeconds: Double?,
@@ -395,6 +423,7 @@ private data class FusionPreviewPayload(
     val projectWidth: Int?,
     val projectHeight: Int?,
     val baseClipId: String?,
+    val baseClipIds: List<String>,
     val selectedClipId: String?,
     val sceneNodes: List<Map<String, Any?>>,
     val positionSeconds: Double,
@@ -430,8 +459,10 @@ private class FusionPreviewNativeView(
     private val overlayContainer = FrameLayout(context)
     private var surface: Surface? = null
     private var mediaPlayer: MediaPlayer? = null
+    private var currentSourceId: String? = null
     private var currentSourcePath: String? = null
     private var currentSourceKind: String? = null
+    private var upcomingSourceId: String? = null
     private var upcomingSourcePath: String? = null
     private var upcomingSourceKind: String? = null
     private var currentSourceStartSeconds: Double = 0.0
@@ -441,6 +472,7 @@ private class FusionPreviewNativeView(
     private var currentProjectWidth: Int = 0
     private var currentProjectHeight: Int = 0
     private var currentBaseClipId: String? = null
+    private var currentBaseClipIds: Set<String> = emptySet()
     private var currentSelectedClipId: String? = null
     private var currentSceneNodes: List<Map<String, Any?>> = emptyList()
     private var lastRenderedSceneKey: String = ""
@@ -449,11 +481,13 @@ private class FusionPreviewNativeView(
     private var isPrepared: Boolean = false
     private var preloadedMediaPlayer: MediaPlayer? = null
     private var preloadedImageBitmap: Bitmap? = null
+    private var preloadedSourceId: String? = null
     private var preloadedSourcePath: String? = null
     private var preloadedSourceKind: String? = null
     private var preloadedSourceStartSeconds: Double = 0.0
     private var preloadedSourceEndSeconds: Double? = null
     private var isPreloadedPrepared: Boolean = false
+    private var lastAppliedTransportRevision: Int = -1
     private val boundaryRunnable = object : Runnable {
         override fun run() {
             removeCallbacks(this)
@@ -488,6 +522,10 @@ private class FusionPreviewNativeView(
 
         FusionPreviewRegistry.attach(projectId, this)
         update(
+            0,
+            null,
+            null,
+            null,
             null,
             null,
             null,
@@ -499,14 +537,19 @@ private class FusionPreviewNativeView(
             null,
             null,
             emptyList(),
+            null,
+            emptyList(),
             0.0,
             false,
         )
     }
 
     fun update(
+        transportRevision: Int,
+        sourceId: String?,
         sourcePath: String?,
         sourceKind: String?,
+        upcomingSourceId: String?,
         upcomingSourcePath: String?,
         upcomingSourceKind: String?,
         sourceStartSeconds: Double?,
@@ -516,17 +559,44 @@ private class FusionPreviewNativeView(
         projectWidth: Int?,
         projectHeight: Int?,
         baseClipId: String?,
+        baseClipIds: List<String>,
         selectedClipId: String?,
         sceneNodes: List<Map<String, Any?>>,
         positionSeconds: Double,
         isPlaying: Boolean,
     ) {
-        val sourceChanged = sourcePath != currentSourcePath || sourceKind != currentSourceKind
+        val selectionChanged = selectedClipId != currentSelectedClipId
+        val playStateChanged = isPlaying != isCurrentlyPlaying
+        val transportChanged = transportRevision != lastAppliedTransportRevision
+        lastAppliedTransportRevision = transportRevision
+        val nextSourceStartSeconds = kotlin.math.max(0.0, sourceStartSeconds ?: 0.0)
+        val nextHasSource = sourceId != null || sourcePath != null || sourceKind != null
+        val currentHasSource =
+            currentSourceId != null || currentSourcePath != null || currentSourceKind != null
+        val sourceChanged =
+            nextHasSource != currentHasSource ||
+                (
+                    nextHasSource &&
+                        !previewSourceMatches(
+                            sourceId = sourceId,
+                            sourcePath = sourcePath,
+                            sourceKind = sourceKind,
+                            sourceStartSeconds = nextSourceStartSeconds,
+                            sourceEndSeconds = sourceEndSeconds,
+                            againstId = currentSourceId,
+                            againstPath = currentSourcePath,
+                            againstKind = currentSourceKind,
+                            againstStartSeconds = currentSourceStartSeconds,
+                            againstEndSeconds = currentSourceEndSeconds,
+                        )
+                )
+        currentSourceId = sourceId
         currentSourcePath = sourcePath
         currentSourceKind = sourceKind
+        this.upcomingSourceId = upcomingSourceId
         this.upcomingSourcePath = upcomingSourcePath
         this.upcomingSourceKind = upcomingSourceKind
-        currentSourceStartSeconds = kotlin.math.max(0.0, sourceStartSeconds ?: 0.0)
+        currentSourceStartSeconds = nextSourceStartSeconds
         currentSourceEndSeconds = sourceEndSeconds
         this.upcomingSourceStartSeconds =
             kotlin.math.max(0.0, upcomingSourceStartSeconds ?: 0.0)
@@ -534,6 +604,11 @@ private class FusionPreviewNativeView(
         currentProjectWidth = projectWidth ?: 0
         currentProjectHeight = projectHeight ?: 0
         currentBaseClipId = baseClipId
+        currentBaseClipIds =
+            buildSet {
+                addAll(baseClipIds)
+                baseClipId?.let(::add)
+            }
         currentSelectedClipId = selectedClipId
         currentSceneNodes = sceneNodes
         currentPositionSeconds = positionSeconds
@@ -543,11 +618,16 @@ private class FusionPreviewNativeView(
         }
         prepareUpcomingSource()
         val nextSceneKey = sceneIdentityKey()
-        if (nextSceneKey != lastRenderedSceneKey) {
+        if (
+            nextSceneKey != lastRenderedSceneKey ||
+                (selectionChanged && !isCurrentlyPlaying && !playStateChanged)
+        ) {
             renderCompositionScene()
             lastRenderedSceneKey = nextSceneKey
         }
-        applyTransport()
+        applyTransport(
+            shouldRetarget = sourceChanged || transportChanged,
+        )
     }
 
     fun dispose() {
@@ -599,28 +679,30 @@ private class FusionPreviewNativeView(
         isPrepared = false
         if (nextPlayer != null) {
             mediaPlayer = nextPlayer
+            mediaPlayer?.setVolume(1f, 1f)
             mediaPlayer?.setSurface(previewSurface)
             mediaPlayer?.setOnPreparedListener {
                 isPrepared = true
-                applyTransport()
+                applyTransport(shouldRetarget = true)
             }
             isPrepared = isPreloadedPrepared
             isPreloadedPrepared = false
             if (isPrepared) {
-                applyTransport()
+                applyTransport(shouldRetarget = true)
             }
             return
         }
 
         mediaPlayer = buildVideoPlayer(path, previewSurface) {
             isPrepared = true
-            applyTransport()
+            applyTransport(shouldRetarget = true)
         }
     }
 
     private fun buildVideoPlayer(
         path: String,
         surface: Surface? = null,
+        muted: Boolean = false,
         onPrepared: () -> Unit,
     ): MediaPlayer {
         return MediaPlayer().apply {
@@ -634,6 +716,7 @@ private class FusionPreviewNativeView(
             if (surface != null) {
                 setSurface(surface)
             }
+            setVolume(if (muted) 0f else 1f, if (muted) 0f else 1f)
             isLooping = false
             setOnPreparedListener { onPrepared() }
             prepareAsync()
@@ -641,19 +724,22 @@ private class FusionPreviewNativeView(
     }
 
     private fun prepareUpcomingSource() {
+        val sourceId = upcomingSourceId
         val path = upcomingSourcePath
         val kind = upcomingSourceKind
-        if (path.isNullOrBlank() || kind.isNullOrBlank()) {
+        if (sourceId.isNullOrBlank() || path.isNullOrBlank() || kind.isNullOrBlank()) {
             releasePreloadedSource()
             return
         }
 
         if (
             previewSourceMatches(
+                sourceId = sourceId,
                 sourcePath = path,
                 sourceKind = kind,
                 sourceStartSeconds = upcomingSourceStartSeconds,
                 sourceEndSeconds = upcomingSourceEndSeconds,
+                againstId = currentSourceId,
                 againstPath = currentSourcePath,
                 againstKind = currentSourceKind,
                 againstStartSeconds = currentSourceStartSeconds,
@@ -666,10 +752,12 @@ private class FusionPreviewNativeView(
 
         if (
             previewSourceMatches(
+                sourceId = sourceId,
                 sourcePath = path,
                 sourceKind = kind,
                 sourceStartSeconds = upcomingSourceStartSeconds,
                 sourceEndSeconds = upcomingSourceEndSeconds,
+                againstId = preloadedSourceId,
                 againstPath = preloadedSourcePath,
                 againstKind = preloadedSourceKind,
                 againstStartSeconds = preloadedSourceStartSeconds,
@@ -680,6 +768,7 @@ private class FusionPreviewNativeView(
         }
 
         releasePreloadedSource()
+        preloadedSourceId = sourceId
         preloadedSourcePath = path
         preloadedSourceKind = kind
         preloadedSourceStartSeconds = upcomingSourceStartSeconds
@@ -688,7 +777,10 @@ private class FusionPreviewNativeView(
         when (kind) {
             "video" -> {
                 isPreloadedPrepared = false
-                preloadedMediaPlayer = buildVideoPlayer(path) {
+                preloadedMediaPlayer = buildVideoPlayer(path, muted = true) {
+                    preloadedMediaPlayer?.seekTo(
+                        (upcomingSourceStartSeconds * 1000.0).roundToInt().coerceAtLeast(0),
+                    )
                     isPreloadedPrepared = true
                 }
             }
@@ -706,10 +798,12 @@ private class FusionPreviewNativeView(
     private fun takePreloadedPlayerIfMatching(): MediaPlayer? {
         if (
             !previewSourceMatches(
+                sourceId = currentSourceId,
                 sourcePath = currentSourcePath,
                 sourceKind = currentSourceKind,
                 sourceStartSeconds = currentSourceStartSeconds,
                 sourceEndSeconds = currentSourceEndSeconds,
+                againstId = preloadedSourceId,
                 againstPath = preloadedSourcePath,
                 againstKind = preloadedSourceKind,
                 againstStartSeconds = preloadedSourceStartSeconds,
@@ -721,6 +815,7 @@ private class FusionPreviewNativeView(
         val nextPlayer = preloadedMediaPlayer ?: return null
         preloadedMediaPlayer = null
         preloadedImageBitmap = null
+        preloadedSourceId = null
         preloadedSourcePath = null
         preloadedSourceKind = null
         preloadedSourceStartSeconds = 0.0
@@ -732,10 +827,12 @@ private class FusionPreviewNativeView(
     private fun takePreloadedImageIfMatching(): Bitmap? {
         if (
             !previewSourceMatches(
+                sourceId = currentSourceId,
                 sourcePath = currentSourcePath,
                 sourceKind = currentSourceKind,
                 sourceStartSeconds = currentSourceStartSeconds,
                 sourceEndSeconds = currentSourceEndSeconds,
+                againstId = preloadedSourceId,
                 againstPath = preloadedSourcePath,
                 againstKind = preloadedSourceKind,
                 againstStartSeconds = preloadedSourceStartSeconds,
@@ -751,6 +848,7 @@ private class FusionPreviewNativeView(
 
     private fun releasePreloadedSource() {
         preloadedMediaPlayer?.setOnPreparedListener(null)
+        preloadedMediaPlayer?.setVolume(0f, 0f)
         preloadedMediaPlayer?.stopSafely()
         preloadedMediaPlayer?.release()
         preloadedMediaPlayer = null
@@ -763,27 +861,38 @@ private class FusionPreviewNativeView(
     }
 
     private fun previewSourceMatches(
+        sourceId: String?,
         sourcePath: String?,
         sourceKind: String?,
         sourceStartSeconds: Double,
         sourceEndSeconds: Double?,
+        againstId: String?,
         againstPath: String?,
         againstKind: String?,
         againstStartSeconds: Double,
         againstEndSeconds: Double?,
     ): Boolean {
         if (
-            sourcePath.isNullOrBlank() ||
-            sourceKind.isNullOrBlank() ||
-            againstPath.isNullOrBlank() ||
-            againstKind.isNullOrBlank()
+            !sourcePath.isNullOrBlank() &&
+            !sourceKind.isNullOrBlank() &&
+            !againstPath.isNullOrBlank() &&
+            !againstKind.isNullOrBlank()
         ) {
-            return false
+            return sourcePath == againstPath &&
+                sourceKind == againstKind &&
+                kotlin.math.abs(sourceStartSeconds - againstStartSeconds) <= 0.001 &&
+                kotlin.math.abs((sourceEndSeconds ?: 0.0) - (againstEndSeconds ?: 0.0)) <=
+                    0.001
         }
-        return sourcePath == againstPath &&
-            sourceKind == againstKind &&
-            kotlin.math.abs(sourceStartSeconds - againstStartSeconds) <= 0.001 &&
-            kotlin.math.abs((sourceEndSeconds ?: 0.0) - (againstEndSeconds ?: 0.0)) <= 0.001
+        if (!sourceId.isNullOrBlank() && !againstId.isNullOrBlank()) {
+            return sourceId == againstId
+        }
+        return sourceId.isNullOrBlank() &&
+            sourcePath.isNullOrBlank() &&
+            sourceKind.isNullOrBlank() &&
+            againstId.isNullOrBlank() &&
+            againstPath.isNullOrBlank() &&
+            againstKind.isNullOrBlank()
     }
 
     private fun renderCompositionScene() {
@@ -800,7 +909,7 @@ private class FusionPreviewNativeView(
 
         for (node in sortedNodes) {
             val clipId = node["clipId"] as? String ?: continue
-            if (clipId == currentBaseClipId) continue
+            if (currentBaseClipIds.contains(clipId)) continue
 
             val nodeWidth = ((node["width"] as? Number)?.toDouble() ?: 0.0)
             val nodeHeight = ((node["height"] as? Number)?.toDouble() ?: 0.0)
@@ -825,12 +934,20 @@ private class FusionPreviewNativeView(
                     setColor(Color.parseColor("#171717"))
                     setStroke(
                         if (clipId == currentSelectedClipId) {
-                            (2f * resources.displayMetrics.density).roundToInt()
+                            if (!isCurrentlyPlaying) {
+                                (2f * resources.displayMetrics.density).roundToInt()
+                            } else {
+                                (1f * resources.displayMetrics.density).roundToInt()
+                            }
                         } else {
                             (1f * resources.displayMetrics.density).roundToInt()
                         },
                         if (clipId == currentSelectedClipId) {
-                            Color.parseColor("#47E0D4")
+                            if (!isCurrentlyPlaying) {
+                                Color.parseColor("#47E0D4")
+                            } else {
+                                Color.argb(36, 255, 255, 255)
+                            }
                         } else {
                             Color.argb(36, 255, 255, 255)
                         },
@@ -914,13 +1031,16 @@ private class FusionPreviewNativeView(
         }
     }
 
-    private fun applyTransport() {
+    private fun applyTransport(shouldRetarget: Boolean) {
         val player = mediaPlayer ?: return
         if (!isPrepared) return
 
         val targetMs = clampedPositionMs(currentPositionSeconds)
         val seekThresholdMs = if (isCurrentlyPlaying) 180 else 40
-        if (kotlin.math.abs(player.currentPosition - targetMs) > seekThresholdMs) {
+        if (
+            shouldRetarget &&
+            kotlin.math.abs(player.currentPosition - targetMs) > seekThresholdMs
+        ) {
             player.seekTo(targetMs)
         }
 
@@ -939,6 +1059,7 @@ private class FusionPreviewNativeView(
 
     private fun releasePlayer() {
         mediaPlayer?.setOnPreparedListener(null)
+        mediaPlayer?.setVolume(0f, 0f)
         mediaPlayer?.stopSafely()
         mediaPlayer?.release()
         mediaPlayer = null
@@ -982,20 +1103,20 @@ private class FusionPreviewNativeView(
     override fun onSurfaceTextureUpdated(surface: SurfaceTexture) = Unit
 
     private fun sceneIdentityKey(): String {
+        val overlayNodes = currentSceneNodes.filter {
+            val clipId = it["clipId"] as? String
+            clipId == null || !currentBaseClipIds.contains(clipId)
+        }
         val builder = StringBuilder()
         builder
             .append("pw:")
             .append(currentProjectWidth)
             .append("|ph:")
             .append(currentProjectHeight)
-            .append("|base:")
-            .append(currentBaseClipId ?: "")
-            .append("|selected:")
-            .append(currentSelectedClipId ?: "")
             .append("|count:")
-            .append(currentSceneNodes.size)
+            .append(overlayNodes.size)
 
-        currentSceneNodes
+        overlayNodes
             .sortedBy { it["clipId"] as? String ?: "" }
             .forEach { node ->
                 builder

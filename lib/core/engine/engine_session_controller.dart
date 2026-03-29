@@ -195,14 +195,18 @@ class FusionVideoEngineSessionController extends ChangeNotifier {
         continue;
       }
       var elapsed = 0.0;
-      for (final clip in track.clips) {
+      for (var index = 0; index < track.clips.length; index++) {
+        final clip = track.clips[index];
         final start = elapsed;
         final end = start + clip.duration;
         elapsed = end;
         if (clip.type != TimelineClipType.media) {
           continue;
         }
-        if (seconds >= start && seconds <= end + 0.0001) {
+        final isTerminalClip = index == track.clips.length - 1;
+        final containsSeconds =
+            seconds >= start && (isTerminalClip ? seconds <= end + 0.0001 : seconds < end);
+        if (containsSeconds) {
           final assetId = clip.assetId;
           if (assetId == null) {
             return null;
@@ -358,6 +362,8 @@ class FusionVideoEngineSessionController extends ChangeNotifier {
             id: '${clip.id}_b_$splitStamp',
             duration: rightDuration,
             splitGroupId: splitGroupId,
+            sourceOffsetSeconds:
+                (clip.sourceOffsetSeconds ?? 0) + leftDuration,
           );
 
           nextClips

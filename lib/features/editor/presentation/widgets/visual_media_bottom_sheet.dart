@@ -33,6 +33,7 @@ class _VisualMediaBottomSheetState extends State<VisualMediaBottomSheet> {
   bool _isLoading = true;
   bool _isLoadingMore = false;
   bool _isImporting = false;
+  bool _isRequestingAccess = false;
   bool _hasMore = true;
   bool _hasAccess = true;
   bool _isLimited = false;
@@ -142,6 +143,32 @@ class _VisualMediaBottomSheetState extends State<VisualMediaBottomSheet> {
     }
   }
 
+  Future<void> _requestAccessFromSheet() async {
+    if (_isRequestingAccess) {
+      return;
+    }
+
+    setState(() => _isRequestingAccess = true);
+    try {
+      final access = await DeviceMediaLibrary.requestAccess();
+      if (!mounted) {
+        return;
+      }
+      if (access.hasAccess) {
+        await _reload();
+        return;
+      }
+      setState(() {
+        _hasAccess = access.hasAccess;
+        _isLimited = access.isLimited;
+      });
+    } finally {
+      if (mounted) {
+        setState(() => _isRequestingAccess = false);
+      }
+    }
+  }
+
   String _formatDuration(DeviceMediaAsset asset) {
     final seconds = asset.durationSeconds?.round() ?? 0;
     final minutes = (seconds ~/ 60).toString().padLeft(2, '0');
@@ -194,7 +221,7 @@ class _VisualMediaBottomSheetState extends State<VisualMediaBottomSheet> {
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
             const Text(
-              'Allow photo access to browse your studio here.',
+              'Allow media access to browse your studio here.',
               textAlign: TextAlign.center,
               style: TextStyle(
                 color: FxPalette.textPrimary,
@@ -205,8 +232,8 @@ class _VisualMediaBottomSheetState extends State<VisualMediaBottomSheet> {
             const SizedBox(height: 10),
             Text(
               _isLimited
-                  ? 'Only selected media are visible right now.'
-                  : 'Without permission, videos and images cannot appear in this sheet.',
+                  ? 'Only selected media are visible right now. You can allow more anytime.'
+                  : 'Without permission, videos and images cannot appear inside this sheet.',
               textAlign: TextAlign.center,
               style: const TextStyle(
                 color: FxPalette.textMuted,
@@ -216,13 +243,35 @@ class _VisualMediaBottomSheetState extends State<VisualMediaBottomSheet> {
             ),
             const SizedBox(height: 18),
             FilledButton(
-              onPressed: DeviceMediaLibrary.openSettings,
+              onPressed: _isRequestingAccess ? null : _requestAccessFromSheet,
               style: FilledButton.styleFrom(
                 backgroundColor: Colors.white,
                 foregroundColor: Colors.black,
                 minimumSize: const Size(132, 44),
               ),
-              child: const Text('Open Settings'),
+              child: _isRequestingAccess
+                  ? const SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        color: Colors.black,
+                      ),
+                    )
+                  : const Text('Allow Access'),
+            ),
+            const SizedBox(height: 10),
+            TextButton(
+              onPressed:
+                  _isRequestingAccess ? null : DeviceMediaLibrary.openSettings,
+              child: const Text(
+                'Open Settings',
+                style: TextStyle(
+                  color: FxPalette.textMuted,
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
             ),
           ],
         ),

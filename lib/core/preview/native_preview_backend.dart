@@ -31,21 +31,24 @@ class NativePreviewBackend extends FusionPreviewBackend {
     bool force = false,
   }) async {
     final targetSeconds = positionSeconds < 0 ? 0.0 : positionSeconds;
-    final nextState = _state.copyWith(
+    final baseState = _state.copyWith(
       positionSeconds: targetSeconds,
       isPlaying: isPlaying,
     );
     final shouldPush = force ||
-        nextState.isPlaying != _state.isPlaying ||
-        (!nextState.isPlaying &&
-            (nextState.positionSeconds - _state.positionSeconds).abs() > 0.001);
-
-    if (!shouldPush) {
-      return;
-    }
+        baseState.isPlaying != _state.isPlaying ||
+        (!baseState.isPlaying &&
+            (baseState.positionSeconds - _state.positionSeconds).abs() > 0.001);
+    final nextState = baseState.copyWith(
+      transportRevision:
+          _state.transportRevision + (shouldPush ? 1 : 0),
+    );
 
     _state = nextState;
     notifyListeners();
+    if (!shouldPush) {
+      return;
+    }
     await _pushState();
   }
 
@@ -102,6 +105,7 @@ class NativePreviewBackend extends FusionPreviewBackend {
     required List<PreviewCompositionNode> nodes,
     required List<PreviewAudioNode> audioNodes,
     String? baseClipId,
+    List<String>? baseClipIds,
     String? selectedClipId,
     double baseAudioGain = 1,
     bool baseAudioMuted = false,
@@ -113,6 +117,7 @@ class NativePreviewBackend extends FusionPreviewBackend {
       projectHeight: projectHeight,
       baseClipId: baseClipId,
       clearBaseClipId: baseClipId == null,
+      baseClipIds: baseClipIds,
       selectedClipId: selectedClipId,
       clearSelectedClipId: selectedClipId == null,
       baseAudioGain: baseAudioGain,
@@ -159,12 +164,15 @@ class NativePreviewBackend extends FusionPreviewBackend {
       projectId: projectId,
       positionSeconds: _state.positionSeconds,
       isPlaying: _state.isPlaying,
+      transportRevision: _state.transportRevision,
+      sourceId: _state.source?.effectiveAttachmentId,
       sourcePath: _state.source?.localPath,
       sourceKind: switch (_state.source?.kind) {
         PreviewSourceKind.video => 'video',
         PreviewSourceKind.image => 'image',
         null => null,
       },
+      upcomingSourceId: _state.upcomingSource?.effectiveAttachmentId,
       upcomingSourcePath: _state.upcomingSource?.localPath,
       upcomingSourceKind: switch (_state.upcomingSource?.kind) {
         PreviewSourceKind.video => 'video',
@@ -180,6 +188,7 @@ class NativePreviewBackend extends FusionPreviewBackend {
       projectWidth: _state.projectWidth,
       projectHeight: _state.projectHeight,
       baseClipId: _state.baseClipId,
+      baseClipIds: _state.baseClipIds,
       selectedClipId: _state.selectedClipId,
       baseAudioGain: _state.baseAudioGain,
       baseAudioMuted: _state.baseAudioMuted,

@@ -165,8 +165,11 @@ import AVFoundation
 
         FusionPreviewRegistry.shared.update(
           projectId: projectId,
+          transportRevision: (args["transportRevision"] as? NSNumber)?.int64Value ?? 0,
+          sourceId: args["sourceId"] as? String,
           sourcePath: args["sourcePath"] as? String,
           sourceKind: args["sourceKind"] as? String,
+          upcomingSourceId: args["upcomingSourceId"] as? String,
           upcomingSourcePath: args["upcomingSourcePath"] as? String,
           upcomingSourceKind: args["upcomingSourceKind"] as? String,
           clipStartSeconds: args["clipStartSeconds"] as? Double,
@@ -178,6 +181,7 @@ import AVFoundation
           projectWidth: args["projectWidth"] as? Int,
           projectHeight: args["projectHeight"] as? Int,
           baseClipId: args["baseClipId"] as? String,
+          baseClipIds: args["baseClipIds"] as? [String] ?? [],
           selectedClipId: args["selectedClipId"] as? String,
           baseAudioGain: args["baseAudioGain"] as? Double,
           baseAudioMuted: args["baseAudioMuted"] as? Bool,
@@ -976,8 +980,11 @@ private final class FusionPreviewRegistry {
     views[projectId] = bucket
     if let payload = payloads[projectId] {
       view.update(
+        transportRevision: payload.transportRevision,
+        sourceId: payload.sourceId,
         sourcePath: payload.sourcePath,
         sourceKind: payload.sourceKind,
+        upcomingSourceId: payload.upcomingSourceId,
         upcomingSourcePath: payload.upcomingSourcePath,
         upcomingSourceKind: payload.upcomingSourceKind,
         clipStartSeconds: payload.clipStartSeconds,
@@ -989,6 +996,7 @@ private final class FusionPreviewRegistry {
         projectWidth: payload.projectWidth,
         projectHeight: payload.projectHeight,
         baseClipId: payload.baseClipId,
+        baseClipIds: payload.baseClipIds,
         selectedClipId: payload.selectedClipId,
         baseAudioGain: payload.baseAudioGain,
         baseAudioMuted: payload.baseAudioMuted,
@@ -1006,8 +1014,11 @@ private final class FusionPreviewRegistry {
 
   func update(
     projectId: Int64,
+    transportRevision: Int64,
+    sourceId: String?,
     sourcePath: String?,
     sourceKind: String?,
+    upcomingSourceId: String?,
     upcomingSourcePath: String?,
     upcomingSourceKind: String?,
     clipStartSeconds: Double?,
@@ -1019,6 +1030,7 @@ private final class FusionPreviewRegistry {
     projectWidth: Int?,
     projectHeight: Int?,
     baseClipId: String?,
+    baseClipIds: [String],
     selectedClipId: String?,
     baseAudioGain: Double?,
     baseAudioMuted: Bool?,
@@ -1028,8 +1040,11 @@ private final class FusionPreviewRegistry {
     isPlaying: Bool
   ) {
     payloads[projectId] = FusionPreviewPayload(
+      transportRevision: transportRevision,
+      sourceId: sourceId,
       sourcePath: sourcePath,
       sourceKind: sourceKind,
+      upcomingSourceId: upcomingSourceId,
       upcomingSourcePath: upcomingSourcePath,
       upcomingSourceKind: upcomingSourceKind,
       clipStartSeconds: clipStartSeconds,
@@ -1041,6 +1056,7 @@ private final class FusionPreviewRegistry {
       projectWidth: projectWidth,
       projectHeight: projectHeight,
       baseClipId: baseClipId,
+      baseClipIds: baseClipIds,
       selectedClipId: selectedClipId,
       baseAudioGain: baseAudioGain,
       baseAudioMuted: baseAudioMuted,
@@ -1051,8 +1067,11 @@ private final class FusionPreviewRegistry {
     )
     views[projectId]?.allObjects.forEach {
       $0.update(
+        transportRevision: transportRevision,
+        sourceId: sourceId,
         sourcePath: sourcePath,
         sourceKind: sourceKind,
+        upcomingSourceId: upcomingSourceId,
         upcomingSourcePath: upcomingSourcePath,
         upcomingSourceKind: upcomingSourceKind,
         clipStartSeconds: clipStartSeconds,
@@ -1064,6 +1083,7 @@ private final class FusionPreviewRegistry {
         projectWidth: projectWidth,
         projectHeight: projectHeight,
         baseClipId: baseClipId,
+        baseClipIds: baseClipIds,
         selectedClipId: selectedClipId,
         baseAudioGain: baseAudioGain,
         baseAudioMuted: baseAudioMuted,
@@ -1077,8 +1097,11 @@ private final class FusionPreviewRegistry {
 }
 
 private struct FusionPreviewPayload {
+  let transportRevision: Int64
+  let sourceId: String?
   let sourcePath: String?
   let sourceKind: String?
+  let upcomingSourceId: String?
   let upcomingSourcePath: String?
   let upcomingSourceKind: String?
   let clipStartSeconds: Double?
@@ -1090,6 +1113,7 @@ private struct FusionPreviewPayload {
   let projectWidth: Int?
   let projectHeight: Int?
   let baseClipId: String?
+  let baseClipIds: [String]
   let selectedClipId: String?
   let baseAudioGain: Double?
   let baseAudioMuted: Bool?
@@ -1134,8 +1158,10 @@ private final class FusionPreviewNativeView: UIView {
   private let playerLayer = AVPlayerLayer()
   private var player: AVPlayer?
   private var playbackObserverToken: Any?
+  private var currentSourceId: String?
   private var currentSourcePath: String?
   private var currentSourceKind: String?
+  private var upcomingSourceId: String?
   private var upcomingSourcePath: String?
   private var upcomingSourceKind: String?
   private var currentClipStartSeconds: Double = 0
@@ -1147,6 +1173,7 @@ private final class FusionPreviewNativeView: UIView {
   private var currentProjectWidth: CGFloat = 0
   private var currentProjectHeight: CGFloat = 0
   private var currentBaseClipId: String?
+  private var currentBaseClipIds: Set<String> = []
   private var currentSelectedClipId: String?
   private var currentBaseAudioGain: Float = 1.0
   private var currentBaseAudioMuted = false
@@ -1161,10 +1188,12 @@ private final class FusionPreviewNativeView: UIView {
   private var lastRenderedAudioKey = ""
   private var preloadedPlayer: AVPlayer?
   private var preloadedImage: UIImage?
+  private var preloadedSourceId: String?
   private var preloadedSourcePath: String?
   private var preloadedSourceKind: String?
   private var preloadedSourceStartSeconds: Double = 0
   private var preloadedSourceEndSeconds: Double?
+  private var lastAppliedTransportRevision: Int64 = -1
 
   init(frame: CGRect, projectId: Int64) {
     self.projectId = projectId
@@ -1172,8 +1201,11 @@ private final class FusionPreviewNativeView: UIView {
     setupUI()
     FusionPreviewRegistry.shared.attach(view: self, projectId: projectId)
     update(
+      transportRevision: 0,
+      sourceId: nil,
       sourcePath: nil,
       sourceKind: nil,
+      upcomingSourceId: nil,
       upcomingSourcePath: nil,
       upcomingSourceKind: nil,
       clipStartSeconds: nil,
@@ -1185,6 +1217,7 @@ private final class FusionPreviewNativeView: UIView {
       projectWidth: nil,
       projectHeight: nil,
       baseClipId: nil,
+      baseClipIds: [],
       selectedClipId: nil,
       baseAudioGain: nil,
       baseAudioMuted: nil,
@@ -1228,8 +1261,11 @@ private final class FusionPreviewNativeView: UIView {
   }
 
   func update(
+    transportRevision: Int64,
+    sourceId: String?,
     sourcePath: String?,
     sourceKind: String?,
+    upcomingSourceId: String?,
     upcomingSourcePath: String?,
     upcomingSourceKind: String?,
     clipStartSeconds: Double?,
@@ -1241,6 +1277,7 @@ private final class FusionPreviewNativeView: UIView {
     projectWidth: Int?,
     projectHeight: Int?,
     baseClipId: String?,
+    baseClipIds: [String],
     selectedClipId: String?,
     baseAudioGain: Double?,
     baseAudioMuted: Bool?,
@@ -1249,20 +1286,50 @@ private final class FusionPreviewNativeView: UIView {
     positionSeconds: Double,
     isPlaying: Bool
   ) {
-    let sourceChanged = sourcePath != currentSourcePath || sourceKind != currentSourceKind
+    let selectionChanged = selectedClipId != currentSelectedClipId
+    let playStateChanged = isPlaying != isCurrentlyPlaying
+    let transportChanged = transportRevision != lastAppliedTransportRevision
+    lastAppliedTransportRevision = transportRevision
+    let nextSourceStartSeconds = max(0, sourceStartSeconds ?? 0)
+    let nextHasSource = sourceId != nil || sourcePath != nil || sourceKind != nil
+    let currentHasSource =
+      currentSourceId != nil || currentSourcePath != nil || currentSourceKind != nil
+    let sourceChanged =
+      nextHasSource != currentHasSource ||
+      (
+        nextHasSource &&
+        !previewSourceMatches(
+          sourceId: sourceId,
+          sourcePath: sourcePath,
+          sourceKind: sourceKind,
+          sourceStartSeconds: nextSourceStartSeconds,
+          sourceEndSeconds: sourceEndSeconds,
+          againstId: currentSourceId,
+          againstPath: currentSourcePath,
+          kind: currentSourceKind,
+          startSeconds: currentSourceStartSeconds,
+          endSeconds: currentSourceEndSeconds
+        )
+      )
+    currentSourceId = sourceId
     currentSourcePath = sourcePath
     currentSourceKind = sourceKind
+    self.upcomingSourceId = upcomingSourceId
     self.upcomingSourcePath = upcomingSourcePath
     self.upcomingSourceKind = upcomingSourceKind
     currentClipStartSeconds = max(0, clipStartSeconds ?? 0)
     currentClipEndSeconds = clipEndSeconds
-    currentSourceStartSeconds = max(0, sourceStartSeconds ?? 0)
+    currentSourceStartSeconds = nextSourceStartSeconds
     currentSourceEndSeconds = sourceEndSeconds
     self.upcomingSourceStartSeconds = max(0, upcomingSourceStartSeconds ?? 0)
     self.upcomingSourceEndSeconds = upcomingSourceEndSeconds
     currentProjectWidth = CGFloat(projectWidth ?? 0)
     currentProjectHeight = CGFloat(projectHeight ?? 0)
     currentBaseClipId = baseClipId
+    currentBaseClipIds = Set(baseClipIds)
+    if let baseClipId {
+      currentBaseClipIds.insert(baseClipId)
+    }
     currentSelectedClipId = selectedClipId
     currentBaseAudioGain = Float(baseAudioGain ?? 1.0)
     currentBaseAudioMuted = baseAudioMuted ?? false
@@ -1275,7 +1342,7 @@ private final class FusionPreviewNativeView: UIView {
     }
     prepareUpcomingSource()
     let nextKey = sceneIdentityKey()
-    if nextKey != lastRenderedSceneKey {
+    if nextKey != lastRenderedSceneKey || (selectionChanged && !isCurrentlyPlaying && !playStateChanged) {
       renderCompositionScene()
       lastRenderedSceneKey = nextKey
     }
@@ -1284,7 +1351,7 @@ private final class FusionPreviewNativeView: UIView {
       renderAudioScene()
       lastRenderedAudioKey = nextAudioKey
     }
-    applyTransport()
+    applyTransport(shouldRetarget: sourceChanged || transportChanged)
     applyOverlayTransport()
     applyAudioTransport()
   }
@@ -1296,6 +1363,12 @@ private final class FusionPreviewNativeView: UIView {
     guard let player else { return }
     player.volume = currentBaseAudioMuted ? 0.0 : currentBaseAudioGain
     player.isMuted = currentBaseAudioMuted
+  }
+
+  private func silencePlayer(_ player: AVPlayer?) {
+    guard let player else { return }
+    player.volume = 0.0
+    player.isMuted = true
   }
 
   private func setupUI() {
@@ -1322,6 +1395,7 @@ private final class FusionPreviewNativeView: UIView {
 
   private func loadSource() {
     guard let sourceKind = currentSourceKind, let sourcePath = currentSourcePath else {
+      silencePlayer(player)
       player?.pause()
       removePlaybackObserver()
       player = nil
@@ -1329,6 +1403,7 @@ private final class FusionPreviewNativeView: UIView {
       playerLayer.isHidden = true
       imageView.image = nil
       imageView.isHidden = true
+      currentSourceId = nil
       clearPreloadedSource()
       return
     }
@@ -1339,12 +1414,15 @@ private final class FusionPreviewNativeView: UIView {
       imageView.isHidden = true
       let newPlayer = takePreloadedPlayerIfMatching() ?? makePlayer(for: sourcePath)
       removePlaybackObserver()
+      silencePlayer(player)
       player?.pause()
       player = newPlayer
       playerLayer.player = newPlayer
       playerLayer.isHidden = false
       addPlaybackObserver(to: newPlayer)
+      applyBaseAudioSettings()
     case "image":
+      silencePlayer(player)
       player?.pause()
       removePlaybackObserver()
       player = nil
@@ -1353,6 +1431,7 @@ private final class FusionPreviewNativeView: UIView {
       imageView.image = takePreloadedImageIfMatching() ?? UIImage(contentsOfFile: sourcePath)
       imageView.isHidden = false
     default:
+      silencePlayer(player)
       player?.pause()
       removePlaybackObserver()
       player = nil
@@ -1376,6 +1455,7 @@ private final class FusionPreviewNativeView: UIView {
 
   private func prepareUpcomingSource() {
     guard
+      let sourceId = upcomingSourceId,
       let sourcePath = upcomingSourcePath,
       let sourceKind = upcomingSourceKind
     else {
@@ -1384,10 +1464,12 @@ private final class FusionPreviewNativeView: UIView {
     }
 
     if previewSourceMatches(
+      sourceId: sourceId,
       sourcePath: sourcePath,
       sourceKind: sourceKind,
       sourceStartSeconds: upcomingSourceStartSeconds,
       sourceEndSeconds: upcomingSourceEndSeconds,
+      againstId: currentSourceId,
       againstPath: currentSourcePath,
       kind: currentSourceKind,
       startSeconds: currentSourceStartSeconds,
@@ -1398,10 +1480,12 @@ private final class FusionPreviewNativeView: UIView {
     }
 
     if previewSourceMatches(
+      sourceId: sourceId,
       sourcePath: sourcePath,
       sourceKind: sourceKind,
       sourceStartSeconds: upcomingSourceStartSeconds,
       sourceEndSeconds: upcomingSourceEndSeconds,
+      againstId: preloadedSourceId,
       againstPath: preloadedSourcePath,
       kind: preloadedSourceKind,
       startSeconds: preloadedSourceStartSeconds,
@@ -1411,6 +1495,7 @@ private final class FusionPreviewNativeView: UIView {
     }
 
     clearPreloadedSource()
+    preloadedSourceId = sourceId
     preloadedSourcePath = sourcePath
     preloadedSourceKind = sourceKind
     preloadedSourceStartSeconds = upcomingSourceStartSeconds
@@ -1421,6 +1506,10 @@ private final class FusionPreviewNativeView: UIView {
       let nextPlayer = makePlayer(for: sourcePath)
       nextPlayer.isMuted = true
       nextPlayer.volume = 0
+      seekPlayer(
+        nextPlayer,
+        to: CMTime(seconds: max(0, upcomingSourceStartSeconds), preferredTimescale: 600)
+      )
       preloadedPlayer = nextPlayer
     case "image":
       preloadedImage = UIImage(contentsOfFile: sourcePath)
@@ -1432,10 +1521,12 @@ private final class FusionPreviewNativeView: UIView {
   private func takePreloadedPlayerIfMatching() -> AVPlayer? {
     guard
       previewSourceMatches(
+        sourceId: currentSourceId,
         sourcePath: currentSourcePath,
         sourceKind: currentSourceKind,
         sourceStartSeconds: currentSourceStartSeconds,
         sourceEndSeconds: currentSourceEndSeconds,
+        againstId: preloadedSourceId,
         againstPath: preloadedSourcePath,
         kind: preloadedSourceKind,
         startSeconds: preloadedSourceStartSeconds,
@@ -1453,10 +1544,12 @@ private final class FusionPreviewNativeView: UIView {
   private func takePreloadedImageIfMatching() -> UIImage? {
     guard
       previewSourceMatches(
+        sourceId: currentSourceId,
         sourcePath: currentSourcePath,
         sourceKind: currentSourceKind,
         sourceStartSeconds: currentSourceStartSeconds,
         sourceEndSeconds: currentSourceEndSeconds,
+        againstId: preloadedSourceId,
         againstPath: preloadedSourcePath,
         kind: preloadedSourceKind,
         startSeconds: preloadedSourceStartSeconds,
@@ -1473,10 +1566,12 @@ private final class FusionPreviewNativeView: UIView {
 
   private func clearPreloadedSource(keepCurrentPlayer: Bool = false) {
     if !keepCurrentPlayer {
+      silencePlayer(preloadedPlayer)
       preloadedPlayer?.pause()
     }
     preloadedPlayer = nil
     preloadedImage = nil
+    preloadedSourceId = nil
     preloadedSourcePath = nil
     preloadedSourceKind = nil
     preloadedSourceStartSeconds = 0
@@ -1484,32 +1579,52 @@ private final class FusionPreviewNativeView: UIView {
   }
 
   private func previewSourceMatches(
+    sourceId: String?,
     sourcePath: String?,
     sourceKind: String?,
     sourceStartSeconds: Double,
     sourceEndSeconds: Double?,
+    againstId: String?,
     againstPath: String?,
     kind: String?,
     startSeconds: Double,
     endSeconds: Double?
   ) -> Bool {
-    guard let sourcePath, let sourceKind, let againstPath, let kind else {
-      return false
+    if let sourcePath, let sourceKind, let againstPath, let kind {
+      return sourcePath == againstPath &&
+        sourceKind == kind &&
+        abs(sourceStartSeconds - startSeconds) <= 0.001 &&
+        abs((sourceEndSeconds ?? 0) - (endSeconds ?? 0)) <= 0.001
     }
-    return sourcePath == againstPath &&
-      sourceKind == kind &&
-      abs(sourceStartSeconds - startSeconds) <= 0.001 &&
-      abs((sourceEndSeconds ?? 0) - (endSeconds ?? 0)) <= 0.001
+    if let sourceId, let againstId {
+      return sourceId == againstId
+    }
+    return sourceId == nil &&
+      sourcePath == nil &&
+      sourceKind == nil &&
+      againstId == nil &&
+      againstPath == nil &&
+      kind == nil
   }
 
-  private func applyTransport() {
+  private func seekPlayer(_ player: AVPlayer, to target: CMTime) {
+    player.seek(
+      to: target,
+      toleranceBefore: .zero,
+      toleranceAfter: .zero
+    )
+  }
+
+  private func applyTransport(shouldRetarget: Bool) {
     guard currentSourceKind == "video", let player else { return }
 
     let targetSeconds = clampedPositionSeconds(currentPosition)
     let target = CMTime(seconds: targetSeconds, preferredTimescale: 600)
     let current = player.currentTime().seconds
     let seekThreshold = isCurrentlyPlaying ? 0.18 : 0.04
-    let shouldSeek = !current.isFinite || abs(current - targetSeconds) > seekThreshold
+    let shouldSeek =
+      shouldRetarget &&
+      (!current.isFinite || abs(current - targetSeconds) > seekThreshold)
     let seekTolerance = CMTime(
       seconds: isCurrentlyPlaying ? (1.0 / 60.0) : 0.0,
       preferredTimescale: 600
@@ -1543,8 +1658,8 @@ private final class FusionPreviewNativeView: UIView {
     playbackObserverToken = player.addPeriodicTimeObserver(
       forInterval: CMTime(seconds: 1.0 / 30.0, preferredTimescale: 600),
       queue: .main
-    ) { [weak self, weak player] _ in
-      guard let self, let player else { return }
+    ) { [weak self] _ in
+      guard let self else { return }
       self.applyOverlayTransport(referenceProjectSeconds: self.currentProjectPlaybackSeconds())
     }
   }
@@ -1588,7 +1703,7 @@ private final class FusionPreviewNativeView: UIView {
 
     for node in sortedNodes {
       guard let clipId = node["clipId"] as? String else { continue }
-      if clipId == currentBaseClipId { continue }
+      if currentBaseClipIds.contains(clipId) { continue }
       let kind = node["kind"] as? String ?? "video"
 
       let x = (node["x"] as? NSNumber)?.doubleValue ?? 0
@@ -1608,7 +1723,7 @@ private final class FusionPreviewNativeView: UIView {
       applyChrome(
         to: container,
         kind: kind,
-        isSelected: clipId == currentSelectedClipId
+        isSelected: !isCurrentlyPlaying && clipId == currentSelectedClipId
       )
       container.alpha = CGFloat((node["opacity"] as? NSNumber)?.doubleValue ?? 1.0)
       container.transform = CGAffineTransform(
@@ -1620,7 +1735,7 @@ private final class FusionPreviewNativeView: UIView {
       let localPath = node["localPath"] as? String
       let displayLabel = node["displayLabel"] as? String
       let content: UIView
-      if kind == "image", let localPath, let image = UIImage(contentsOfFile: localPath) {
+      if kind == "image", let localPath, UIImage(contentsOfFile: localPath) != nil {
         let staticView =
           reusableStaticViews.removeValue(forKey: clipId)
           ?? FusionOverlayStaticNodeView(frame: container.bounds)
@@ -1679,7 +1794,7 @@ private final class FusionPreviewNativeView: UIView {
 
     for node in currentAudioNodes {
       guard let clipId = node["clipId"] as? String else { continue }
-      if clipId == currentBaseClipId { continue }
+      if currentBaseClipIds.contains(clipId) { continue }
       guard let localPath = node["localPath"] as? String else { continue }
       if currentSourceKind == "video", localPath == currentSourcePath {
         continue
@@ -1805,11 +1920,14 @@ private final class FusionPreviewNativeView: UIView {
     var parts = [
       "pw:\(Int(currentProjectWidth))",
       "ph:\(Int(currentProjectHeight))",
-      "base:\(currentBaseClipId ?? "")",
-      "selected:\(currentSelectedClipId ?? "")",
       "count:\(currentSceneNodes.count)"
     ]
-    for node in currentSceneNodes.sorted(by: {
+    let overlayNodes = currentSceneNodes.filter { node in
+      guard let clipId = node["clipId"] as? String else { return true }
+      return !currentBaseClipIds.contains(clipId)
+    }
+    parts[2] = "count:\(overlayNodes.count)"
+    for node in overlayNodes.sorted(by: {
       (($0["clipId"] as? String) ?? "") < (($1["clipId"] as? String) ?? "")
     }) {
       parts.append(
@@ -1832,10 +1950,22 @@ private final class FusionPreviewNativeView: UIView {
   }
 
   private func audioIdentityKey() -> String {
+    let renderedNodes = currentAudioNodes.filter { node in
+      let clipId = node["clipId"] as? String
+      if let clipId, currentBaseClipIds.contains(clipId) {
+        return false
+      }
+      if currentSourceKind == "video",
+        let localPath = node["localPath"] as? String,
+        localPath == currentSourcePath {
+        return false
+      }
+      return true
+    }
     var parts = [
-      "count:\(currentAudioNodes.count)"
+      "count:\(renderedNodes.count)"
     ]
-    for node in currentAudioNodes.sorted(by: {
+    for node in renderedNodes.sorted(by: {
       (($0["clipId"] as? String) ?? "") < (($1["clipId"] as? String) ?? "")
     }) {
       parts.append(
@@ -1949,6 +2079,8 @@ private final class FusionOverlayVideoNodeView: UIView {
   }
 
   func dispose() {
+    player?.volume = 0
+    player?.isMuted = true
     player?.pause()
     removePlaybackObserver()
     playerLayer.player = nil
@@ -2023,6 +2155,8 @@ private final class FusionOverlayAudioNodePlayer {
     newPlayer.volume = gain
     newPlayer.isMuted = isMuted
     removePlaybackObserver()
+    player?.volume = 0
+    player?.isMuted = true
     player?.pause()
     player = newPlayer
     addPlaybackObserver(to: newPlayer)
@@ -2070,6 +2204,8 @@ private final class FusionOverlayAudioNodePlayer {
   }
 
   func dispose() {
+    player?.volume = 0
+    player?.isMuted = true
     player?.pause()
     removePlaybackObserver()
     player = nil

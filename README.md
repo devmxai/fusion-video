@@ -254,6 +254,10 @@ These issues are currently considered active and unresolved:
 - Some playback flows can still behave as if there is a `5s` duration clamp due to incomplete normalization between Flutter defaults, imported media metadata, and engine timeline duration
 - Scrubbing / preview playback still needs a real performance pass to eliminate lag, black flashes, and delayed frame updates
 - Clip seam playback is still not production-safe: after `split`, and at `video -> video` or `video -> image` joins, the preview can hitch, distort briefly, or transition harshly instead of staying smooth
+- On Android, pressing `play` after pausing and moving the playhead forward can still restart from the beginning of the source instead of respecting the new timeline position
+- Split clips are still not fully trustworthy as real timeline segments: after `split`, some playback paths still behave as if each resulting part is reading from the source start rather than its true clip-local offset
+- On Android, horizontal timeline scrubbing can move the UI ruler/track while the preview canvas lags behind the finger and does not update with the same smoothness seen on iOS simulator
+- During playback, the visible video motion can still show small jitter / unstable movement instead of steady frame-to-frame transport
 - Native preview behavior is not yet fully symmetric between iOS and Android
 - Android export is still not implemented; export foundation currently exists on iOS first
 - The Rust engine is connected through FFI, but real production playback/rendering is still only partially delegated to the engine
@@ -411,6 +415,10 @@ Current symptoms under active investigation:
 - audio can sound noisy, choked, or otherwise unclear in some timeline playback paths
 - scrub / seek can still cause black flashes or delayed visual response in some cases
 - seam points are still a major blocker: when a clip is split, or when playback crosses `video -> video` / `video -> image`, the join can lag and briefly deform the picture instead of playing through smoothly
+- after `pause -> seek forward -> play`, playback can still jump back to the beginning of the source instead of starting from the requested timeline time
+- after `split`, each resulting clip can still behave as if it is not fully anchored to its real timeline/source offset, which makes cuts feel visually incorrect and not truly timeline-accurate
+- on Android specifically, timeline scrolling/scrubbing can move the timeline UI while the preview canvas trails behind and does not track the finger with iOS-level smoothness
+- even when playback starts correctly, motion on the preview surface can still show small jitter / instability during transport
 
 Important clarification:
 
