@@ -88,4 +88,79 @@ void main() {
 
     expect(shouldAttach, isTrue);
   });
+
+  test('recognizes same preview stream across split bounds', () {
+    const current = PreviewSource(
+      id: 'clip-1',
+      assetId: 'asset-1',
+      kind: PreviewSourceKind.video,
+      localPath: '/tmp/a.mp4',
+      sourceStartSeconds: 0,
+      sourceEndSeconds: 4,
+      clipDurationSeconds: 4,
+    );
+    const target = PreviewSource(
+      id: 'clip-2',
+      assetId: 'asset-1',
+      kind: PreviewSourceKind.video,
+      localPath: '/tmp/a.mp4',
+      sourceStartSeconds: 1.25,
+      sourceEndSeconds: 4,
+      clipDurationSeconds: 2.75,
+    );
+
+    final sameStream = EditorSceneMapper.isSamePreviewStream(current, target);
+
+    expect(sameStream, isTrue);
+  });
+
+  test('recognizes same preview stream across duplicated asset records', () {
+    const current = PreviewSource(
+      id: 'clip-1',
+      assetId: 'asset-1',
+      kind: PreviewSourceKind.video,
+      localPath: '/tmp/a.mp4',
+      sourceStartSeconds: 0,
+      sourceEndSeconds: 4,
+      clipDurationSeconds: 4,
+    );
+    const target = PreviewSource(
+      id: 'clip-2',
+      assetId: 'asset-2',
+      kind: PreviewSourceKind.video,
+      localPath: '/tmp/a.mp4',
+      sourceStartSeconds: 4,
+      sourceEndSeconds: 8,
+      clipDurationSeconds: 4,
+    );
+
+    final sameStream = EditorSceneMapper.isSamePreviewStream(current, target);
+
+    expect(sameStream, isTrue);
+  });
+
+  test('tracks upcoming preview source changes when nullability changes', () {
+    const current = PreviewSource(
+      id: 'clip-1',
+      assetId: 'asset-1',
+      kind: PreviewSourceKind.video,
+      localPath: '/tmp/a.mp4',
+      sourceStartSeconds: 0,
+      sourceEndSeconds: 4,
+      clipDurationSeconds: 4,
+    );
+
+    expect(
+      EditorSceneMapper.hasPreviewSourceChanged(current, null),
+      isTrue,
+    );
+    expect(
+      EditorSceneMapper.hasPreviewSourceChanged(null, current),
+      isTrue,
+    );
+    expect(
+      EditorSceneMapper.hasPreviewSourceChanged(null, null),
+      isFalse,
+    );
+  });
 }

@@ -2,6 +2,7 @@ package com.example.fx_flutter_editor
 
 import android.graphics.BitmapFactory
 import android.content.Context
+import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.SurfaceTexture
 import android.graphics.Typeface
@@ -10,6 +11,8 @@ import android.media.AudioAttributes
 import android.media.MediaMetadataRetriever
 import android.media.MediaPlayer
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.Surface
@@ -24,9 +27,14 @@ import io.flutter.plugin.common.MethodChannel
 import io.flutter.plugin.common.StandardMessageCodec
 import io.flutter.plugin.platform.PlatformView
 import io.flutter.plugin.platform.PlatformViewFactory
+import java.io.ByteArrayOutputStream
+import java.util.concurrent.Executors
 import kotlin.math.roundToInt
 
 class MainActivity : FlutterActivity() {
+    private val mediaThumbnailExecutor = Executors.newSingleThreadExecutor()
+    private val mainHandler = Handler(Looper.getMainLooper())
+
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
 
@@ -53,8 +61,14 @@ class MainActivity : FlutterActivity() {
             val isPlaying = args?.get("isPlaying") as? Boolean
             val sourcePath = args?.get("sourcePath") as? String
             val sourceKind = args?.get("sourceKind") as? String
+            val upcomingSourcePath = args?.get("upcomingSourcePath") as? String
+            val upcomingSourceKind = args?.get("upcomingSourceKind") as? String
             val sourceStartSeconds = (args?.get("sourceStartSeconds") as? Number)?.toDouble()
             val sourceEndSeconds = (args?.get("sourceEndSeconds") as? Number)?.toDouble()
+            val upcomingSourceStartSeconds =
+                (args?.get("upcomingSourceStartSeconds") as? Number)?.toDouble()
+            val upcomingSourceEndSeconds =
+                (args?.get("upcomingSourceEndSeconds") as? Number)?.toDouble()
             val projectWidth = (args?.get("projectWidth") as? Number)?.toInt()
             val projectHeight = (args?.get("projectHeight") as? Number)?.toInt()
             val baseClipId = args?.get("baseClipId") as? String
@@ -77,8 +91,12 @@ class MainActivity : FlutterActivity() {
                 projectId,
                 sourcePath,
                 sourceKind,
+                upcomingSourcePath,
+                upcomingSourceKind,
                 sourceStartSeconds,
                 sourceEndSeconds,
+                upcomingSourceStartSeconds,
+                upcomingSourceEndSeconds,
                 projectWidth,
                 projectHeight,
                 baseClipId,
@@ -94,21 +112,61 @@ class MainActivity : FlutterActivity() {
             flutterEngine.dartExecutor.binaryMessenger,
             "fusion_video/media_probe",
         ).setMethodCallHandler { call, result ->
-            if (call.method != "probeMedia") {
-                result.notImplemented()
-                return@setMethodCallHandler
+            when (call.method) {
+                "probeMedia" -> {
+                    val args = call.arguments as? Map<*, *>
+                    val path = args?.get("path") as? String
+                    val kind = args?.get("kind") as? String
+
+                    if (path == null || kind == null) {
+                        result.error("invalid_args", "Missing probe arguments", null)
+                        return@setMethodCallHandler
+                    }
+
+                    result.success(FusionMediaProbe.probe(path, kind))
+                }
+
+                "generateVideoThumbnails" -> {
+                    val args = call.arguments as? Map<*, *>
+                    val path = args?.get("path") as? String
+                    val timestampsSeconds =
+                        (args?.get("timestampsSeconds") as? List<*>)?.mapNotNull {
+                            (it as? Number)?.toDouble()
+                        }
+                    val targetWidth = (args?.get("targetWidth") as? Number)?.toInt() ?: 80
+                    val targetHeight = (args?.get("targetHeight") as? Number)?.toInt() ?: 48
+
+                    if (path == null || timestampsSeconds == null) {
+                        result.error("invalid_args", "Missing thumbnail arguments", null)
+                        return@setMethodCallHandler
+                    }
+
+                    mediaThumbnailExecutor.execute {
+                        try {
+                            val thumbnails =
+                                FusionMediaThumbnailGenerator.generateVideoThumbnails(
+                                    path = path,
+                                    timestampsSeconds = timestampsSeconds,
+                                    targetWidth = targetWidth,
+                                    targetHeight = targetHeight,
+                                )
+                            mainHandler.post {
+                                result.success(thumbnails)
+                            }
+                        } catch (error: Throwable) {
+                            mainHandler.post {
+                                result.error(
+                                    "thumbnail_failed",
+                                    error.message ?: "Failed to generate thumbnails",
+                                    null,
+                                )
+                            }
+                        }
+                    }
+                }
+
+                else -> result.notImplemented()
             }
-
-            val args = call.arguments as? Map<*, *>
-            val path = args?.get("path") as? String
-            val kind = args?.get("kind") as? String
-
-            if (path == null || kind == null) {
-                result.error("invalid_args", "Missing probe arguments", null)
-                return@setMethodCallHandler
-            }
-
-            result.success(FusionMediaProbe.probe(path, kind))
         }
 
         MethodChannel(
@@ -132,6 +190,11 @@ class MainActivity : FlutterActivity() {
                 else -> result.notImplemented()
             }
         }
+    }
+
+    override fun onDestroy() {
+        mediaThumbnailExecutor.shutdown()
+        super.onDestroy()
     }
 }
 
@@ -192,6 +255,45 @@ private object FusionMediaProbe {
     }
 }
 
+private object FusionMediaThumbnailGenerator {
+    fun generateVideoThumbnails(
+        path: String,
+        timestampsSeconds: List<Double>,
+        targetWidth: Int,
+        targetHeight: Int,
+    ): List<ByteArray> {
+        if (timestampsSeconds.isEmpty()) {
+            return emptyList()
+        }
+
+        val retriever = MediaMetadataRetriever()
+        return try {
+            retriever.setDataSource(path)
+            timestampsSeconds.mapNotNull { seconds ->
+                val frame = retriever.getFrameAtTime(
+                    (seconds.coerceAtLeast(0.0) * 1_000_000L).toLong(),
+                    MediaMetadataRetriever.OPTION_CLOSEST_SYNC,
+                ) ?: return@mapNotNull null
+                val scaled = Bitmap.createScaledBitmap(
+                    frame,
+                    targetWidth.coerceAtLeast(24),
+                    targetHeight.coerceAtLeast(24),
+                    true,
+                )
+                val buffer = ByteArrayOutputStream()
+                scaled.compress(Bitmap.CompressFormat.JPEG, 72, buffer)
+                if (scaled != frame) {
+                    scaled.recycle()
+                }
+                frame.recycle()
+                buffer.toByteArray()
+            }
+        } finally {
+            retriever.release()
+        }
+    }
+}
+
 private object FusionPreviewRegistry {
     private val views = mutableMapOf<Int, MutableList<FusionPreviewNativeView>>()
     private val payloads = mutableMapOf<Int, FusionPreviewPayload>()
@@ -203,8 +305,12 @@ private object FusionPreviewRegistry {
             view.update(
                 it.sourcePath,
                 it.sourceKind,
+                it.upcomingSourcePath,
+                it.upcomingSourceKind,
                 it.sourceStartSeconds,
                 it.sourceEndSeconds,
+                it.upcomingSourceStartSeconds,
+                it.upcomingSourceEndSeconds,
                 it.projectWidth,
                 it.projectHeight,
                 it.baseClipId,
@@ -224,8 +330,12 @@ private object FusionPreviewRegistry {
         projectId: Int,
         sourcePath: String?,
         sourceKind: String?,
+        upcomingSourcePath: String?,
+        upcomingSourceKind: String?,
         sourceStartSeconds: Double?,
         sourceEndSeconds: Double?,
+        upcomingSourceStartSeconds: Double?,
+        upcomingSourceEndSeconds: Double?,
         projectWidth: Int?,
         projectHeight: Int?,
         baseClipId: String?,
@@ -237,8 +347,12 @@ private object FusionPreviewRegistry {
         payloads[projectId] = FusionPreviewPayload(
             sourcePath = sourcePath,
             sourceKind = sourceKind,
+            upcomingSourcePath = upcomingSourcePath,
+            upcomingSourceKind = upcomingSourceKind,
             sourceStartSeconds = sourceStartSeconds,
             sourceEndSeconds = sourceEndSeconds,
+            upcomingSourceStartSeconds = upcomingSourceStartSeconds,
+            upcomingSourceEndSeconds = upcomingSourceEndSeconds,
             projectWidth = projectWidth,
             projectHeight = projectHeight,
             baseClipId = baseClipId,
@@ -251,8 +365,12 @@ private object FusionPreviewRegistry {
             it.update(
                 sourcePath,
                 sourceKind,
+                upcomingSourcePath,
+                upcomingSourceKind,
                 sourceStartSeconds,
                 sourceEndSeconds,
+                upcomingSourceStartSeconds,
+                upcomingSourceEndSeconds,
                 projectWidth,
                 projectHeight,
                 baseClipId,
@@ -268,8 +386,12 @@ private object FusionPreviewRegistry {
 private data class FusionPreviewPayload(
     val sourcePath: String?,
     val sourceKind: String?,
+    val upcomingSourcePath: String?,
+    val upcomingSourceKind: String?,
     val sourceStartSeconds: Double?,
     val sourceEndSeconds: Double?,
+    val upcomingSourceStartSeconds: Double?,
+    val upcomingSourceEndSeconds: Double?,
     val projectWidth: Int?,
     val projectHeight: Int?,
     val baseClipId: String?,
@@ -310,8 +432,12 @@ private class FusionPreviewNativeView(
     private var mediaPlayer: MediaPlayer? = null
     private var currentSourcePath: String? = null
     private var currentSourceKind: String? = null
+    private var upcomingSourcePath: String? = null
+    private var upcomingSourceKind: String? = null
     private var currentSourceStartSeconds: Double = 0.0
     private var currentSourceEndSeconds: Double? = null
+    private var upcomingSourceStartSeconds: Double = 0.0
+    private var upcomingSourceEndSeconds: Double? = null
     private var currentProjectWidth: Int = 0
     private var currentProjectHeight: Int = 0
     private var currentBaseClipId: String? = null
@@ -321,20 +447,16 @@ private class FusionPreviewNativeView(
     private var currentPositionSeconds: Double = 0.0
     private var isCurrentlyPlaying: Boolean = false
     private var isPrepared: Boolean = false
+    private var preloadedMediaPlayer: MediaPlayer? = null
+    private var preloadedImageBitmap: Bitmap? = null
+    private var preloadedSourcePath: String? = null
+    private var preloadedSourceKind: String? = null
+    private var preloadedSourceStartSeconds: Double = 0.0
+    private var preloadedSourceEndSeconds: Double? = null
+    private var isPreloadedPrepared: Boolean = false
     private val boundaryRunnable = object : Runnable {
         override fun run() {
-            val player = mediaPlayer ?: return
-            val endSeconds = currentSourceEndSeconds ?: return
-            val endMs = (endSeconds * 1000.0).toInt().coerceAtLeast(0)
-            if (player.currentPosition >= endMs - 15) {
-                player.pause()
-                player.seekTo(endMs)
-                removeCallbacks(this)
-                return
-            }
-            if (isCurrentlyPlaying) {
-                postDelayed(this, 33)
-            }
+            removeCallbacks(this)
         }
     }
 
@@ -365,14 +487,32 @@ private class FusionPreviewNativeView(
         addView(overlayContainer)
 
         FusionPreviewRegistry.attach(projectId, this)
-        update(null, null, null, null, null, null, null, null, emptyList(), 0.0, false)
+        update(
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            emptyList(),
+            0.0,
+            false,
+        )
     }
 
     fun update(
         sourcePath: String?,
         sourceKind: String?,
+        upcomingSourcePath: String?,
+        upcomingSourceKind: String?,
         sourceStartSeconds: Double?,
         sourceEndSeconds: Double?,
+        upcomingSourceStartSeconds: Double?,
+        upcomingSourceEndSeconds: Double?,
         projectWidth: Int?,
         projectHeight: Int?,
         baseClipId: String?,
@@ -384,8 +524,13 @@ private class FusionPreviewNativeView(
         val sourceChanged = sourcePath != currentSourcePath || sourceKind != currentSourceKind
         currentSourcePath = sourcePath
         currentSourceKind = sourceKind
+        this.upcomingSourcePath = upcomingSourcePath
+        this.upcomingSourceKind = upcomingSourceKind
         currentSourceStartSeconds = kotlin.math.max(0.0, sourceStartSeconds ?: 0.0)
         currentSourceEndSeconds = sourceEndSeconds
+        this.upcomingSourceStartSeconds =
+            kotlin.math.max(0.0, upcomingSourceStartSeconds ?: 0.0)
+        this.upcomingSourceEndSeconds = upcomingSourceEndSeconds
         currentProjectWidth = projectWidth ?: 0
         currentProjectHeight = projectHeight ?: 0
         currentBaseClipId = baseClipId
@@ -396,6 +541,7 @@ private class FusionPreviewNativeView(
         if (sourceChanged) {
             loadSource()
         }
+        prepareUpcomingSource()
         val nextSceneKey = sceneIdentityKey()
         if (nextSceneKey != lastRenderedSceneKey) {
             renderCompositionScene()
@@ -406,6 +552,7 @@ private class FusionPreviewNativeView(
 
     fun dispose() {
         releasePlayer()
+        releasePreloadedSource()
         removeCallbacks(boundaryRunnable)
         surface?.release()
         surface = null
@@ -418,9 +565,6 @@ private class FusionPreviewNativeView(
                 imageView.setImageDrawable(null)
                 imageView.visibility = View.GONE
                 textureView.visibility = View.VISIBLE
-                if (surface == null) {
-                    return
-                }
                 prepareVideoPlayer()
             }
 
@@ -429,7 +573,8 @@ private class FusionPreviewNativeView(
                 textureView.visibility = View.GONE
                 imageView.visibility = View.VISIBLE
                 imageView.setImageBitmap(
-                    currentSourcePath?.let { BitmapFactory.decodeFile(it) },
+                    takePreloadedImageIfMatching()
+                        ?: currentSourcePath?.let { BitmapFactory.decodeFile(it) },
                 )
             }
 
@@ -438,6 +583,7 @@ private class FusionPreviewNativeView(
                 textureView.visibility = View.GONE
                 imageView.setImageDrawable(null)
                 imageView.visibility = View.GONE
+                releasePreloadedSource()
             }
         }
     }
@@ -448,9 +594,36 @@ private class FusionPreviewNativeView(
             return
         }
         val previewSurface = surface ?: return
+        val nextPlayer = takePreloadedPlayerIfMatching()
         releasePlayer()
         isPrepared = false
-        mediaPlayer = MediaPlayer().apply {
+        if (nextPlayer != null) {
+            mediaPlayer = nextPlayer
+            mediaPlayer?.setSurface(previewSurface)
+            mediaPlayer?.setOnPreparedListener {
+                isPrepared = true
+                applyTransport()
+            }
+            isPrepared = isPreloadedPrepared
+            isPreloadedPrepared = false
+            if (isPrepared) {
+                applyTransport()
+            }
+            return
+        }
+
+        mediaPlayer = buildVideoPlayer(path, previewSurface) {
+            isPrepared = true
+            applyTransport()
+        }
+    }
+
+    private fun buildVideoPlayer(
+        path: String,
+        surface: Surface? = null,
+        onPrepared: () -> Unit,
+    ): MediaPlayer {
+        return MediaPlayer().apply {
             setAudioAttributes(
                 AudioAttributes.Builder()
                     .setUsage(AudioAttributes.USAGE_MEDIA)
@@ -458,14 +631,159 @@ private class FusionPreviewNativeView(
                     .build(),
             )
             setDataSource(path)
-            setSurface(previewSurface)
-            isLooping = false
-            setOnPreparedListener {
-                isPrepared = true
-                applyTransport()
+            if (surface != null) {
+                setSurface(surface)
             }
+            isLooping = false
+            setOnPreparedListener { onPrepared() }
             prepareAsync()
         }
+    }
+
+    private fun prepareUpcomingSource() {
+        val path = upcomingSourcePath
+        val kind = upcomingSourceKind
+        if (path.isNullOrBlank() || kind.isNullOrBlank()) {
+            releasePreloadedSource()
+            return
+        }
+
+        if (
+            previewSourceMatches(
+                sourcePath = path,
+                sourceKind = kind,
+                sourceStartSeconds = upcomingSourceStartSeconds,
+                sourceEndSeconds = upcomingSourceEndSeconds,
+                againstPath = currentSourcePath,
+                againstKind = currentSourceKind,
+                againstStartSeconds = currentSourceStartSeconds,
+                againstEndSeconds = currentSourceEndSeconds,
+            )
+        ) {
+            releasePreloadedSource()
+            return
+        }
+
+        if (
+            previewSourceMatches(
+                sourcePath = path,
+                sourceKind = kind,
+                sourceStartSeconds = upcomingSourceStartSeconds,
+                sourceEndSeconds = upcomingSourceEndSeconds,
+                againstPath = preloadedSourcePath,
+                againstKind = preloadedSourceKind,
+                againstStartSeconds = preloadedSourceStartSeconds,
+                againstEndSeconds = preloadedSourceEndSeconds,
+            )
+        ) {
+            return
+        }
+
+        releasePreloadedSource()
+        preloadedSourcePath = path
+        preloadedSourceKind = kind
+        preloadedSourceStartSeconds = upcomingSourceStartSeconds
+        preloadedSourceEndSeconds = upcomingSourceEndSeconds
+
+        when (kind) {
+            "video" -> {
+                isPreloadedPrepared = false
+                preloadedMediaPlayer = buildVideoPlayer(path) {
+                    isPreloadedPrepared = true
+                }
+            }
+
+            "image" -> {
+                preloadedImageBitmap = BitmapFactory.decodeFile(path)
+            }
+
+            else -> {
+                releasePreloadedSource()
+            }
+        }
+    }
+
+    private fun takePreloadedPlayerIfMatching(): MediaPlayer? {
+        if (
+            !previewSourceMatches(
+                sourcePath = currentSourcePath,
+                sourceKind = currentSourceKind,
+                sourceStartSeconds = currentSourceStartSeconds,
+                sourceEndSeconds = currentSourceEndSeconds,
+                againstPath = preloadedSourcePath,
+                againstKind = preloadedSourceKind,
+                againstStartSeconds = preloadedSourceStartSeconds,
+                againstEndSeconds = preloadedSourceEndSeconds,
+            )
+        ) {
+            return null
+        }
+        val nextPlayer = preloadedMediaPlayer ?: return null
+        preloadedMediaPlayer = null
+        preloadedImageBitmap = null
+        preloadedSourcePath = null
+        preloadedSourceKind = null
+        preloadedSourceStartSeconds = 0.0
+        preloadedSourceEndSeconds = null
+        isPreloadedPrepared = false
+        return nextPlayer
+    }
+
+    private fun takePreloadedImageIfMatching(): Bitmap? {
+        if (
+            !previewSourceMatches(
+                sourcePath = currentSourcePath,
+                sourceKind = currentSourceKind,
+                sourceStartSeconds = currentSourceStartSeconds,
+                sourceEndSeconds = currentSourceEndSeconds,
+                againstPath = preloadedSourcePath,
+                againstKind = preloadedSourceKind,
+                againstStartSeconds = preloadedSourceStartSeconds,
+                againstEndSeconds = preloadedSourceEndSeconds,
+            )
+        ) {
+            return null
+        }
+        val nextImage = preloadedImageBitmap
+        releasePreloadedSource()
+        return nextImage
+    }
+
+    private fun releasePreloadedSource() {
+        preloadedMediaPlayer?.setOnPreparedListener(null)
+        preloadedMediaPlayer?.stopSafely()
+        preloadedMediaPlayer?.release()
+        preloadedMediaPlayer = null
+        preloadedImageBitmap = null
+        preloadedSourcePath = null
+        preloadedSourceKind = null
+        preloadedSourceStartSeconds = 0.0
+        preloadedSourceEndSeconds = null
+        isPreloadedPrepared = false
+    }
+
+    private fun previewSourceMatches(
+        sourcePath: String?,
+        sourceKind: String?,
+        sourceStartSeconds: Double,
+        sourceEndSeconds: Double?,
+        againstPath: String?,
+        againstKind: String?,
+        againstStartSeconds: Double,
+        againstEndSeconds: Double?,
+    ): Boolean {
+        if (
+            sourcePath.isNullOrBlank() ||
+            sourceKind.isNullOrBlank() ||
+            againstPath.isNullOrBlank() ||
+            againstKind.isNullOrBlank()
+        ) {
+            return false
+        }
+        return sourcePath == againstPath &&
+            sourceKind == againstKind &&
+            kotlin.math.abs(sourceStartSeconds - againstStartSeconds) <= 0.001 &&
+            kotlin.math.abs((sourceEndSeconds ?: 0.0) - (againstEndSeconds ?: 0.0)) <= 0.001
     }
 
     private fun renderCompositionScene() {
@@ -607,19 +925,10 @@ private class FusionPreviewNativeView(
         }
 
         if (isCurrentlyPlaying) {
-            val endMs = currentSourceEndSeconds
-                ?.let { (it * 1000.0).toInt().coerceAtLeast(0) }
-            if (endMs != null && player.currentPosition >= endMs - 15) {
-                player.pause()
-                player.seekTo(endMs)
-                removeCallbacks(boundaryRunnable)
-                return
-            }
             if (!player.isPlaying) {
                 player.start()
             }
             removeCallbacks(boundaryRunnable)
-            post(boundaryRunnable)
         } else if (player.isPlaying) {
             player.pause()
             removeCallbacks(boundaryRunnable)

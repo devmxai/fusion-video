@@ -253,6 +253,7 @@ These issues are currently considered active and unresolved:
 - Timeline preview audio can still sound choked / noisy in some playback paths, especially after clips are inserted into the timeline
 - Some playback flows can still behave as if there is a `5s` duration clamp due to incomplete normalization between Flutter defaults, imported media metadata, and engine timeline duration
 - Scrubbing / preview playback still needs a real performance pass to eliminate lag, black flashes, and delayed frame updates
+- Clip seam playback is still not production-safe: after `split`, and at `video -> video` or `video -> image` joins, the preview can hitch, distort briefly, or transition harshly instead of staying smooth
 - Native preview behavior is not yet fully symmetric between iOS and Android
 - Android export is still not implemented; export foundation currently exists on iOS first
 - The Rust engine is connected through FFI, but real production playback/rendering is still only partially delegated to the engine
@@ -409,6 +410,7 @@ Current symptoms under active investigation:
 - playback can stutter and feel unsmooth during transport updates
 - audio can sound noisy, choked, or otherwise unclear in some timeline playback paths
 - scrub / seek can still cause black flashes or delayed visual response in some cases
+- seam points are still a major blocker: when a clip is split, or when playback crosses `video -> video` / `video -> image`, the join can lag and briefly deform the picture instead of playing through smoothly
 
 Important clarification:
 

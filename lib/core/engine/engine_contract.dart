@@ -261,6 +261,12 @@ abstract class FusionVideoEngineBridge {
     String clipId,
   );
 
+  Future<void> reorderClip(
+    EngineProjectHandle handle,
+    String clipId,
+    int insertionIndex,
+  );
+
   Future<void> setClipGain(
     EngineProjectHandle handle,
     String clipId,

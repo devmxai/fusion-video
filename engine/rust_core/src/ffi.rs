@@ -290,6 +290,33 @@ pub extern "C" fn fusion_video_engine_duplicate_clip(
 }
 
 #[no_mangle]
+pub extern "C" fn fusion_video_engine_reorder_clip(
+    handle: i64,
+    clip_id: *const std::os::raw::c_char,
+    insertion_index: i64,
+) -> u8 {
+    if clip_id.is_null() || insertion_index < 0 {
+        return 0;
+    }
+
+    let Ok(clip_id) = unsafe { CStr::from_ptr(clip_id) }.to_str() else {
+        return 0;
+    };
+
+    with_runtime(handle, |runtime| {
+        if runtime
+            .project
+            .reorder_clip(clip_id, insertion_index as usize)
+        {
+            1
+        } else {
+            0
+        }
+    })
+    .unwrap_or(0)
+}
+
+#[no_mangle]
 pub extern "C" fn fusion_video_engine_set_clip_gain(
     handle: i64,
     clip_id: *const std::os::raw::c_char,

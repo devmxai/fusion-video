@@ -189,6 +189,27 @@ class EditorSceneMapper {
             0.001;
   }
 
+  static bool hasPreviewSourceChanged(
+    PreviewSource? current,
+    PreviewSource? target,
+  ) {
+    if (current == null || target == null) {
+      return current != target;
+    }
+    return shouldAttachPreviewSource(current, target);
+  }
+
+  static bool isSamePreviewStream(
+    PreviewSource? current,
+    PreviewSource target,
+  ) {
+    if (current == null) {
+      return false;
+    }
+
+    return current.localPath == target.localPath && current.kind == target.kind;
+  }
+
   static String _kindName(EngineTrackKind kind) {
     switch (kind) {
       case EngineTrackKind.video:

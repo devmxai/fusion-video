@@ -53,12 +53,38 @@ class NativePreviewBackend extends FusionPreviewBackend {
   Future<void> attachSource(
     PreviewSource? source, {
     bool autoplay = false,
+    PreviewSource? upcomingSource,
+  }) async {
+    final shouldKeepPlaying =
+        source != null && (autoplay || (_state.isReady && _state.isPlaying));
+    _state = _state.copyWith(
+      source: source,
+      clearSource: source == null,
+      upcomingSource: upcomingSource,
+      clearUpcomingSource: upcomingSource == null,
+      isReady: source != null,
+      isPlaying: source == null ? false : shouldKeepPlaying,
+      durationSeconds: source?.effectiveDurationSeconds ?? 0,
+      contentSize: (source?.width != null && source?.height != null)
+          ? Size(source!.width!.toDouble(), source.height!.toDouble())
+          : null,
+      clearContentSize: source == null,
+    );
+    notifyListeners();
+    await _pushState();
+  }
+
+  @override
+  Future<void> updateSource(
+    PreviewSource? source, {
+    PreviewSource? upcomingSource,
   }) async {
     _state = _state.copyWith(
       source: source,
       clearSource: source == null,
+      upcomingSource: upcomingSource,
+      clearUpcomingSource: upcomingSource == null,
       isReady: source != null,
-      isPlaying: source == null ? false : autoplay,
       durationSeconds: source?.effectiveDurationSeconds ?? 0,
       contentSize: (source?.width != null && source?.height != null)
           ? Size(source!.width!.toDouble(), source.height!.toDouble())
@@ -139,10 +165,18 @@ class NativePreviewBackend extends FusionPreviewBackend {
         PreviewSourceKind.image => 'image',
         null => null,
       },
+      upcomingSourcePath: _state.upcomingSource?.localPath,
+      upcomingSourceKind: switch (_state.upcomingSource?.kind) {
+        PreviewSourceKind.video => 'video',
+        PreviewSourceKind.image => 'image',
+        null => null,
+      },
       clipStartSeconds: _state.source?.clipStartSeconds,
       clipEndSeconds: _state.source?.clipEndSeconds,
       sourceStartSeconds: _state.source?.sourceStartSeconds,
       sourceEndSeconds: _state.source?.sourceEndSeconds,
+      upcomingSourceStartSeconds: _state.upcomingSource?.sourceStartSeconds,
+      upcomingSourceEndSeconds: _state.upcomingSource?.sourceEndSeconds,
       projectWidth: _state.projectWidth,
       projectHeight: _state.projectHeight,
       baseClipId: _state.baseClipId,

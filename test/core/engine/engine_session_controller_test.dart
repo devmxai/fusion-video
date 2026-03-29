@@ -67,7 +67,7 @@ void main() {
     controller.dispose();
   });
 
-  test('split creates two media clips and selects the right segment', () async {
+  test('split creates two media clips and clears selection', () async {
     final controller = buildController();
 
     await controller.initialize();
@@ -101,7 +101,66 @@ void main() {
     expect(rightClip.splitGroupId, leftClip.splitGroupId);
     expect(leftClip.sourceOffsetSeconds, closeTo(0, 0.001));
     expect(rightClip.sourceOffsetSeconds, closeTo(1.4, 0.1));
-    expect(controller.selectedClipId, rightClip.id);
+    expect(controller.selectedClipId, isNull);
+
+    await controller.shutdown();
+    controller.dispose();
+  });
+
+  test('split preserves clip order and ignores playhead outside selected clip',
+      () async {
+    final controller = buildController();
+
+    await controller.initialize();
+    await controller.importAsset(
+      const EngineAssetDescriptor(
+        id: 'video-1',
+        uri: '/tmp/video-1.mp4',
+        kind: EngineTrackKind.video,
+        durationSeconds: 3.0,
+      ),
+    );
+    await controller.importAsset(
+      const EngineAssetDescriptor(
+        id: 'video-2',
+        uri: '/tmp/video-2.mp4',
+        kind: EngineTrackKind.video,
+        durationSeconds: 2.0,
+      ),
+    );
+    await controller.insertClip(
+      trackKind: EngineTrackKind.video,
+      clipId: 'video-1',
+      assetId: 'video-1',
+      durationSeconds: 3.0,
+    );
+    await controller.insertClip(
+      trackKind: EngineTrackKind.video,
+      clipId: 'video-2',
+      assetId: 'video-2',
+      durationSeconds: 2.0,
+    );
+
+    controller.selectClip('video-2');
+    await controller.seekSeconds(1.0);
+    await settleEngine();
+    await controller.splitSelectedClip();
+
+    var ids = controller.tracks.first.clips.map((clip) => clip.id).toList();
+    expect(ids, ['video-1', 'video-2']);
+
+    controller.selectClip('video-2');
+    await controller.seekSeconds(4.0);
+    await settleEngine();
+    await controller.splitSelectedClip();
+
+    final clips = controller.tracks.first.clips;
+    ids = clips.map((clip) => clip.id).toList();
+    expect(ids, ['video-1', 'video-2_a_1', 'video-2_b_1']);
+    expect(clips[0].duration, closeTo(3.0, 0.001));
+    expect(clips[1].duration + clips[2].duration, closeTo(2.0, 0.001));
+    expect(clips[1].sourceOffsetSeconds, closeTo(0.0, 0.001));
+    expect(clips[2].sourceOffsetSeconds, closeTo(1.0, 0.001));
 
     await controller.shutdown();
     controller.dispose();
@@ -168,6 +227,66 @@ void main() {
     controller.dispose();
   });
 
+  test('reorder moves a clip to the previewed insertion slot cleanly',
+      () async {
+    final controller = buildController();
+
+    await controller.initialize();
+    await controller.importAsset(
+      const EngineAssetDescriptor(
+        id: 'video-a',
+        uri: '/tmp/video-a.mp4',
+        kind: EngineTrackKind.video,
+        durationSeconds: 1.2,
+      ),
+    );
+    await controller.importAsset(
+      const EngineAssetDescriptor(
+        id: 'video-b',
+        uri: '/tmp/video-b.mp4',
+        kind: EngineTrackKind.video,
+        durationSeconds: 1.4,
+      ),
+    );
+    await controller.importAsset(
+      const EngineAssetDescriptor(
+        id: 'video-c',
+        uri: '/tmp/video-c.mp4',
+        kind: EngineTrackKind.video,
+        durationSeconds: 1.6,
+      ),
+    );
+    await controller.insertClip(
+      trackKind: EngineTrackKind.video,
+      clipId: 'video-a',
+      assetId: 'video-a',
+      durationSeconds: 1.2,
+    );
+    await controller.insertClip(
+      trackKind: EngineTrackKind.video,
+      clipId: 'video-b',
+      assetId: 'video-b',
+      durationSeconds: 1.4,
+    );
+    await controller.insertClip(
+      trackKind: EngineTrackKind.video,
+      clipId: 'video-c',
+      assetId: 'video-c',
+      durationSeconds: 1.6,
+    );
+
+    await controller.reorderClipInTrack('video-a', insertionIndex: 2);
+
+    final clipIds = controller.tracks.first.clips
+        .map((clip) => clip.id)
+        .toList(growable: false);
+    expect(clipIds, <String>['video-b', 'video-c', 'video-a']);
+    expect(controller.selectedClipId, 'video-a');
+
+    await controller.shutdown();
+    controller.dispose();
+  });
+
   test('visual binding resolves local media time after split and trim',
       () async {
     final controller = buildController();
@@ -192,7 +311,7 @@ void main() {
     await settleEngine();
     await controller.splitSelectedClip();
 
-    final rightClipId = controller.selectedClipId!;
+    final rightClipId = controller.tracks.first.clips.last.id;
     await controller.seekSeconds(2.0);
     await settleEngine();
 

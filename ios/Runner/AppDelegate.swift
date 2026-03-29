@@ -24,25 +24,55 @@ import AVFoundation
         binaryMessenger: registrar.messenger()
       )
       probeChannel.setMethodCallHandler { call, result in
-        guard call.method == "probeMedia" else {
-          result(FlutterMethodNotImplemented)
-          return
-        }
-        guard
-          let args = call.arguments as? [String: Any],
-          let path = args["path"] as? String,
-          let kind = args["kind"] as? String
-        else {
-          result(
-            FlutterError(
-              code: "invalid_args",
-              message: "Missing probe arguments",
-              details: nil
+        if call.method == "probeMedia" {
+          guard
+            let args = call.arguments as? [String: Any],
+            let path = args["path"] as? String,
+            let kind = args["kind"] as? String
+          else {
+            result(
+              FlutterError(
+                code: "invalid_args",
+                message: "Missing probe arguments",
+                details: nil
+              )
             )
-          )
+            return
+          }
+          result(FusionMediaProbe.probe(path: path, kind: kind))
           return
         }
-        result(FusionMediaProbe.probe(path: path, kind: kind))
+        if call.method == "generateVideoThumbnails" {
+          guard
+            let args = call.arguments as? [String: Any],
+            let path = args["path"] as? String,
+            let timestampsSeconds = args["timestampsSeconds"] as? [Double]
+          else {
+            result(
+              FlutterError(
+                code: "invalid_args",
+                message: "Missing thumbnail arguments",
+                details: nil
+              )
+            )
+            return
+          }
+          let targetWidth = (args["targetWidth"] as? NSNumber)?.intValue ?? 80
+          let targetHeight = (args["targetHeight"] as? NSNumber)?.intValue ?? 48
+          DispatchQueue.global(qos: .userInitiated).async {
+            let thumbnails = FusionMediaThumbnailGenerator.generateVideoThumbnails(
+              path: path,
+              timestampsSeconds: timestampsSeconds,
+              targetWidth: targetWidth,
+              targetHeight: targetHeight
+            )
+            DispatchQueue.main.async {
+              result(thumbnails)
+            }
+          }
+          return
+        }
+        result(FlutterMethodNotImplemented)
       }
       exportChannel.setMethodCallHandler { call, result in
         switch call.method {
@@ -137,10 +167,14 @@ import AVFoundation
           projectId: projectId,
           sourcePath: args["sourcePath"] as? String,
           sourceKind: args["sourceKind"] as? String,
+          upcomingSourcePath: args["upcomingSourcePath"] as? String,
+          upcomingSourceKind: args["upcomingSourceKind"] as? String,
           clipStartSeconds: args["clipStartSeconds"] as? Double,
           clipEndSeconds: args["clipEndSeconds"] as? Double,
           sourceStartSeconds: args["sourceStartSeconds"] as? Double,
           sourceEndSeconds: args["sourceEndSeconds"] as? Double,
+          upcomingSourceStartSeconds: args["upcomingSourceStartSeconds"] as? Double,
+          upcomingSourceEndSeconds: args["upcomingSourceEndSeconds"] as? Double,
           projectWidth: args["projectWidth"] as? Int,
           projectHeight: args["projectHeight"] as? Int,
           baseClipId: args["baseClipId"] as? String,
@@ -156,6 +190,38 @@ import AVFoundation
       }
     }
     return super.application(application, didFinishLaunchingWithOptions: launchOptions)
+  }
+}
+
+private enum FusionMediaThumbnailGenerator {
+  static func generateVideoThumbnails(
+    path: String,
+    timestampsSeconds: [Double],
+    targetWidth: Int,
+    targetHeight: Int
+  ) -> [FlutterStandardTypedData] {
+    guard !timestampsSeconds.isEmpty else {
+      return []
+    }
+
+    let asset = AVURLAsset(url: URL(fileURLWithPath: path))
+    let generator = AVAssetImageGenerator(asset: asset)
+    generator.appliesPreferredTrackTransform = true
+    generator.maximumSize = CGSize(width: max(targetWidth, 24), height: max(targetHeight, 24))
+
+    var thumbnails: [FlutterStandardTypedData] = []
+    for second in timestampsSeconds {
+      let time = CMTime(seconds: max(second, 0), preferredTimescale: 600)
+      guard let cgImage = try? generator.copyCGImage(at: time, actualTime: nil) else {
+        continue
+      }
+      let image = UIImage(cgImage: cgImage)
+      guard let data = image.jpegData(compressionQuality: 0.72) else {
+        continue
+      }
+      thumbnails.append(FlutterStandardTypedData(bytes: data))
+    }
+    return thumbnails
   }
 }
 
@@ -912,10 +978,14 @@ private final class FusionPreviewRegistry {
       view.update(
         sourcePath: payload.sourcePath,
         sourceKind: payload.sourceKind,
+        upcomingSourcePath: payload.upcomingSourcePath,
+        upcomingSourceKind: payload.upcomingSourceKind,
         clipStartSeconds: payload.clipStartSeconds,
         clipEndSeconds: payload.clipEndSeconds,
         sourceStartSeconds: payload.sourceStartSeconds,
         sourceEndSeconds: payload.sourceEndSeconds,
+        upcomingSourceStartSeconds: payload.upcomingSourceStartSeconds,
+        upcomingSourceEndSeconds: payload.upcomingSourceEndSeconds,
         projectWidth: payload.projectWidth,
         projectHeight: payload.projectHeight,
         baseClipId: payload.baseClipId,
@@ -938,10 +1008,14 @@ private final class FusionPreviewRegistry {
     projectId: Int64,
     sourcePath: String?,
     sourceKind: String?,
+    upcomingSourcePath: String?,
+    upcomingSourceKind: String?,
     clipStartSeconds: Double?,
     clipEndSeconds: Double?,
     sourceStartSeconds: Double?,
     sourceEndSeconds: Double?,
+    upcomingSourceStartSeconds: Double?,
+    upcomingSourceEndSeconds: Double?,
     projectWidth: Int?,
     projectHeight: Int?,
     baseClipId: String?,
@@ -956,10 +1030,14 @@ private final class FusionPreviewRegistry {
     payloads[projectId] = FusionPreviewPayload(
       sourcePath: sourcePath,
       sourceKind: sourceKind,
+      upcomingSourcePath: upcomingSourcePath,
+      upcomingSourceKind: upcomingSourceKind,
       clipStartSeconds: clipStartSeconds,
       clipEndSeconds: clipEndSeconds,
       sourceStartSeconds: sourceStartSeconds,
       sourceEndSeconds: sourceEndSeconds,
+      upcomingSourceStartSeconds: upcomingSourceStartSeconds,
+      upcomingSourceEndSeconds: upcomingSourceEndSeconds,
       projectWidth: projectWidth,
       projectHeight: projectHeight,
       baseClipId: baseClipId,
@@ -975,10 +1053,14 @@ private final class FusionPreviewRegistry {
       $0.update(
         sourcePath: sourcePath,
         sourceKind: sourceKind,
+        upcomingSourcePath: upcomingSourcePath,
+        upcomingSourceKind: upcomingSourceKind,
         clipStartSeconds: clipStartSeconds,
         clipEndSeconds: clipEndSeconds,
         sourceStartSeconds: sourceStartSeconds,
         sourceEndSeconds: sourceEndSeconds,
+        upcomingSourceStartSeconds: upcomingSourceStartSeconds,
+        upcomingSourceEndSeconds: upcomingSourceEndSeconds,
         projectWidth: projectWidth,
         projectHeight: projectHeight,
         baseClipId: baseClipId,
@@ -997,10 +1079,14 @@ private final class FusionPreviewRegistry {
 private struct FusionPreviewPayload {
   let sourcePath: String?
   let sourceKind: String?
+  let upcomingSourcePath: String?
+  let upcomingSourceKind: String?
   let clipStartSeconds: Double?
   let clipEndSeconds: Double?
   let sourceStartSeconds: Double?
   let sourceEndSeconds: Double?
+  let upcomingSourceStartSeconds: Double?
+  let upcomingSourceEndSeconds: Double?
   let projectWidth: Int?
   let projectHeight: Int?
   let baseClipId: String?
@@ -1050,10 +1136,14 @@ private final class FusionPreviewNativeView: UIView {
   private var playbackObserverToken: Any?
   private var currentSourcePath: String?
   private var currentSourceKind: String?
+  private var upcomingSourcePath: String?
+  private var upcomingSourceKind: String?
   private var currentClipStartSeconds: Double = 0
   private var currentClipEndSeconds: Double?
   private var currentSourceStartSeconds: Double = 0
   private var currentSourceEndSeconds: Double?
+  private var upcomingSourceStartSeconds: Double = 0
+  private var upcomingSourceEndSeconds: Double?
   private var currentProjectWidth: CGFloat = 0
   private var currentProjectHeight: CGFloat = 0
   private var currentBaseClipId: String?
@@ -1069,6 +1159,12 @@ private final class FusionPreviewNativeView: UIView {
   private var overlayAudioNodeSnapshots: [String: [String: Any]] = [:]
   private var lastRenderedSceneKey = ""
   private var lastRenderedAudioKey = ""
+  private var preloadedPlayer: AVPlayer?
+  private var preloadedImage: UIImage?
+  private var preloadedSourcePath: String?
+  private var preloadedSourceKind: String?
+  private var preloadedSourceStartSeconds: Double = 0
+  private var preloadedSourceEndSeconds: Double?
 
   init(frame: CGRect, projectId: Int64) {
     self.projectId = projectId
@@ -1078,10 +1174,14 @@ private final class FusionPreviewNativeView: UIView {
     update(
       sourcePath: nil,
       sourceKind: nil,
+      upcomingSourcePath: nil,
+      upcomingSourceKind: nil,
       clipStartSeconds: nil,
       clipEndSeconds: nil,
       sourceStartSeconds: nil,
       sourceEndSeconds: nil,
+      upcomingSourceStartSeconds: nil,
+      upcomingSourceEndSeconds: nil,
       projectWidth: nil,
       projectHeight: nil,
       baseClipId: nil,
@@ -1103,6 +1203,7 @@ private final class FusionPreviewNativeView: UIView {
     player?.pause()
     removePlaybackObserver()
     playerLayer.player = nil
+    clearPreloadedSource()
     overlayVideoViews.values.forEach { $0.dispose() }
     overlayStaticViews.values.forEach { $0.dispose() }
     overlayAudioPlayers.values.forEach { $0.dispose() }
@@ -1129,10 +1230,14 @@ private final class FusionPreviewNativeView: UIView {
   func update(
     sourcePath: String?,
     sourceKind: String?,
+    upcomingSourcePath: String?,
+    upcomingSourceKind: String?,
     clipStartSeconds: Double?,
     clipEndSeconds: Double?,
     sourceStartSeconds: Double?,
     sourceEndSeconds: Double?,
+    upcomingSourceStartSeconds: Double?,
+    upcomingSourceEndSeconds: Double?,
     projectWidth: Int?,
     projectHeight: Int?,
     baseClipId: String?,
@@ -1147,10 +1252,14 @@ private final class FusionPreviewNativeView: UIView {
     let sourceChanged = sourcePath != currentSourcePath || sourceKind != currentSourceKind
     currentSourcePath = sourcePath
     currentSourceKind = sourceKind
+    self.upcomingSourcePath = upcomingSourcePath
+    self.upcomingSourceKind = upcomingSourceKind
     currentClipStartSeconds = max(0, clipStartSeconds ?? 0)
     currentClipEndSeconds = clipEndSeconds
     currentSourceStartSeconds = max(0, sourceStartSeconds ?? 0)
     currentSourceEndSeconds = sourceEndSeconds
+    self.upcomingSourceStartSeconds = max(0, upcomingSourceStartSeconds ?? 0)
+    self.upcomingSourceEndSeconds = upcomingSourceEndSeconds
     currentProjectWidth = CGFloat(projectWidth ?? 0)
     currentProjectHeight = CGFloat(projectHeight ?? 0)
     currentBaseClipId = baseClipId
@@ -1164,6 +1273,7 @@ private final class FusionPreviewNativeView: UIView {
     if sourceChanged {
       loadSource()
     }
+    prepareUpcomingSource()
     let nextKey = sceneIdentityKey()
     if nextKey != lastRenderedSceneKey {
       renderCompositionScene()
@@ -1219,6 +1329,7 @@ private final class FusionPreviewNativeView: UIView {
       playerLayer.isHidden = true
       imageView.image = nil
       imageView.isHidden = true
+      clearPreloadedSource()
       return
     }
 
@@ -1226,14 +1337,9 @@ private final class FusionPreviewNativeView: UIView {
     case "video":
       imageView.image = nil
       imageView.isHidden = true
-      let url = URL(fileURLWithPath: sourcePath)
-      let newPlayer = AVPlayer(url: url)
-      newPlayer.actionAtItemEnd = .pause
-      newPlayer.automaticallyWaitsToMinimizeStalling = false
-      newPlayer.currentItem?.preferredForwardBufferDuration = 0
-      newPlayer.volume = 1.0
-      newPlayer.isMuted = false
+      let newPlayer = takePreloadedPlayerIfMatching() ?? makePlayer(for: sourcePath)
       removePlaybackObserver()
+      player?.pause()
       player = newPlayer
       playerLayer.player = newPlayer
       playerLayer.isHidden = false
@@ -1244,7 +1350,7 @@ private final class FusionPreviewNativeView: UIView {
       player = nil
       playerLayer.player = nil
       playerLayer.isHidden = true
-      imageView.image = UIImage(contentsOfFile: sourcePath)
+      imageView.image = takePreloadedImageIfMatching() ?? UIImage(contentsOfFile: sourcePath)
       imageView.isHidden = false
     default:
       player?.pause()
@@ -1255,6 +1361,145 @@ private final class FusionPreviewNativeView: UIView {
       imageView.image = nil
       imageView.isHidden = true
     }
+  }
+
+  private func makePlayer(for sourcePath: String) -> AVPlayer {
+    let url = URL(fileURLWithPath: sourcePath)
+    let newPlayer = AVPlayer(url: url)
+    newPlayer.actionAtItemEnd = .pause
+    newPlayer.automaticallyWaitsToMinimizeStalling = false
+    newPlayer.currentItem?.preferredForwardBufferDuration = 0
+    newPlayer.volume = 1.0
+    newPlayer.isMuted = false
+    return newPlayer
+  }
+
+  private func prepareUpcomingSource() {
+    guard
+      let sourcePath = upcomingSourcePath,
+      let sourceKind = upcomingSourceKind
+    else {
+      clearPreloadedSource()
+      return
+    }
+
+    if previewSourceMatches(
+      sourcePath: sourcePath,
+      sourceKind: sourceKind,
+      sourceStartSeconds: upcomingSourceStartSeconds,
+      sourceEndSeconds: upcomingSourceEndSeconds,
+      againstPath: currentSourcePath,
+      kind: currentSourceKind,
+      startSeconds: currentSourceStartSeconds,
+      endSeconds: currentSourceEndSeconds
+    ) {
+      clearPreloadedSource()
+      return
+    }
+
+    if previewSourceMatches(
+      sourcePath: sourcePath,
+      sourceKind: sourceKind,
+      sourceStartSeconds: upcomingSourceStartSeconds,
+      sourceEndSeconds: upcomingSourceEndSeconds,
+      againstPath: preloadedSourcePath,
+      kind: preloadedSourceKind,
+      startSeconds: preloadedSourceStartSeconds,
+      endSeconds: preloadedSourceEndSeconds
+    ) {
+      return
+    }
+
+    clearPreloadedSource()
+    preloadedSourcePath = sourcePath
+    preloadedSourceKind = sourceKind
+    preloadedSourceStartSeconds = upcomingSourceStartSeconds
+    preloadedSourceEndSeconds = upcomingSourceEndSeconds
+
+    switch sourceKind {
+    case "video":
+      let nextPlayer = makePlayer(for: sourcePath)
+      nextPlayer.isMuted = true
+      nextPlayer.volume = 0
+      preloadedPlayer = nextPlayer
+    case "image":
+      preloadedImage = UIImage(contentsOfFile: sourcePath)
+    default:
+      clearPreloadedSource()
+    }
+  }
+
+  private func takePreloadedPlayerIfMatching() -> AVPlayer? {
+    guard
+      previewSourceMatches(
+        sourcePath: currentSourcePath,
+        sourceKind: currentSourceKind,
+        sourceStartSeconds: currentSourceStartSeconds,
+        sourceEndSeconds: currentSourceEndSeconds,
+        againstPath: preloadedSourcePath,
+        kind: preloadedSourceKind,
+        startSeconds: preloadedSourceStartSeconds,
+        endSeconds: preloadedSourceEndSeconds
+      ),
+      let nextPlayer = preloadedPlayer
+    else {
+      return nil
+    }
+
+    clearPreloadedSource(keepCurrentPlayer: true)
+    return nextPlayer
+  }
+
+  private func takePreloadedImageIfMatching() -> UIImage? {
+    guard
+      previewSourceMatches(
+        sourcePath: currentSourcePath,
+        sourceKind: currentSourceKind,
+        sourceStartSeconds: currentSourceStartSeconds,
+        sourceEndSeconds: currentSourceEndSeconds,
+        againstPath: preloadedSourcePath,
+        kind: preloadedSourceKind,
+        startSeconds: preloadedSourceStartSeconds,
+        endSeconds: preloadedSourceEndSeconds
+      ),
+      let nextImage = preloadedImage
+    else {
+      return nil
+    }
+
+    clearPreloadedSource()
+    return nextImage
+  }
+
+  private func clearPreloadedSource(keepCurrentPlayer: Bool = false) {
+    if !keepCurrentPlayer {
+      preloadedPlayer?.pause()
+    }
+    preloadedPlayer = nil
+    preloadedImage = nil
+    preloadedSourcePath = nil
+    preloadedSourceKind = nil
+    preloadedSourceStartSeconds = 0
+    preloadedSourceEndSeconds = nil
+  }
+
+  private func previewSourceMatches(
+    sourcePath: String?,
+    sourceKind: String?,
+    sourceStartSeconds: Double,
+    sourceEndSeconds: Double?,
+    againstPath: String?,
+    kind: String?,
+    startSeconds: Double,
+    endSeconds: Double?
+  ) -> Bool {
+    guard let sourcePath, let sourceKind, let againstPath, let kind else {
+      return false
+    }
+    return sourcePath == againstPath &&
+      sourceKind == kind &&
+      abs(sourceStartSeconds - startSeconds) <= 0.001 &&
+      abs((sourceEndSeconds ?? 0) - (endSeconds ?? 0)) <= 0.001
   }
 
   private func applyTransport() {
@@ -1272,14 +1517,6 @@ private final class FusionPreviewNativeView: UIView {
 
     let playOrPause = { [weak self] in
       guard let self else { return }
-      let currentSeconds = player.currentTime().seconds
-      if let endSeconds = self.currentSourceEndSeconds,
-         currentSeconds.isFinite,
-         currentSeconds >= endSeconds - 0.015
-      {
-        player.pause()
-        return
-      }
       if self.isCurrentlyPlaying {
         player.play()
       } else {
@@ -1308,17 +1545,7 @@ private final class FusionPreviewNativeView: UIView {
       queue: .main
     ) { [weak self, weak player] _ in
       guard let self, let player else { return }
-      let currentSeconds = player.currentTime().seconds
       self.applyOverlayTransport(referenceProjectSeconds: self.currentProjectPlaybackSeconds())
-      guard let endSeconds = self.currentSourceEndSeconds else { return }
-      if currentSeconds.isFinite && currentSeconds >= endSeconds - 0.015 {
-        player.pause()
-        player.seek(
-          to: CMTime(seconds: endSeconds, preferredTimescale: 600),
-          toleranceBefore: .zero,
-          toleranceAfter: .zero
-        )
-      }
     }
   }
 

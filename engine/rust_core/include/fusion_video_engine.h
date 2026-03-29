@@ -51,6 +51,11 @@ uint8_t fusion_video_engine_duplicate_clip(
     int64_t handle,
     const char* clip_id
 );
+uint8_t fusion_video_engine_reorder_clip(
+    int64_t handle,
+    const char* clip_id,
+    int64_t insertion_index
+);
 uint8_t fusion_video_engine_set_clip_gain(
     int64_t handle,
     const char* clip_id,

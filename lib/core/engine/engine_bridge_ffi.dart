@@ -3,6 +3,7 @@ import 'dart:ffi' as ffi;
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:flutter/foundation.dart';
 import 'package:ffi/ffi.dart';
 
 import 'engine_contract.dart';
@@ -71,6 +72,16 @@ typedef _EngineDuplicateClipNative = ffi.Uint8 Function(
 );
 typedef _EngineDuplicateClipDart = int Function(
     int handle, ffi.Pointer<ffi.Char> clipId);
+typedef _EngineReorderClipNative = ffi.Uint8 Function(
+  ffi.Int64 handle,
+  ffi.Pointer<ffi.Char> clipId,
+  ffi.Int64 insertionIndex,
+);
+typedef _EngineReorderClipDart = int Function(
+  int handle,
+  ffi.Pointer<ffi.Char> clipId,
+  int insertionIndex,
+);
 typedef _EngineSetClipGainNative = ffi.Uint8 Function(
   ffi.Int64 handle,
   ffi.Pointer<ffi.Char> clipId,
@@ -198,6 +209,14 @@ class FusionVideoFfiBridge implements FusionVideoEngineBridge {
         _engineDuplicateClip = library.lookupFunction<
             _EngineDuplicateClipNative,
             _EngineDuplicateClipDart>('fusion_video_engine_duplicate_clip'),
+        _engineReorderClip = (() {
+          try {
+            return library.lookupFunction<_EngineReorderClipNative,
+                _EngineReorderClipDart>('fusion_video_engine_reorder_clip');
+          } catch (_) {
+            return null;
+          }
+        })(),
         _engineSetClipGain = library.lookupFunction<_EngineSetClipGainNative,
             _EngineSetClipGainDart>('fusion_video_engine_set_clip_gain'),
         _engineSetClipMuted = library.lookupFunction<_EngineSetClipMutedNative,
@@ -243,6 +262,7 @@ class FusionVideoFfiBridge implements FusionVideoEngineBridge {
   final _EngineTrimClipRightDart _engineTrimClipRight;
   final _EngineDeleteClipDart _engineDeleteClip;
   final _EngineDuplicateClipDart _engineDuplicateClip;
+  final _EngineReorderClipDart? _engineReorderClip;
   final _EngineSetClipGainDart _engineSetClipGain;
   final _EngineSetClipMutedDart _engineSetClipMuted;
   final _EngineInsertClipDart _engineInsertClip;
@@ -266,7 +286,9 @@ class FusionVideoFfiBridge implements FusionVideoEngineBridge {
 
     try {
       return FusionVideoFfiBridge._(library);
-    } catch (_) {
+    } catch (error, stackTrace) {
+      debugPrint('Fusion Video: failed to initialize FFI bridge: $error');
+      debugPrintStack(stackTrace: stackTrace);
       return null;
     }
   }
@@ -561,6 +583,33 @@ class FusionVideoFfiBridge implements FusionVideoEngineBridge {
       _ensureSuccess(
         _engineDuplicateClip(handle.id, nativeClipId.cast()),
         'duplicate clip',
+      );
+    } finally {
+      malloc.free(nativeClipId);
+    }
+  }
+
+  @override
+  Future<void> reorderClip(
+    EngineProjectHandle handle,
+    String clipId,
+    int insertionIndex,
+  ) async {
+    final reorderClip = _engineReorderClip;
+    if (reorderClip == null) {
+      throw UnsupportedError(
+        'Loaded Fusion Video engine does not support clip reordering yet. Rebuild the native engine artifacts.',
+      );
+    }
+    final nativeClipId = clipId.toNativeUtf8();
+    try {
+      _ensureSuccess(
+        reorderClip(
+          handle.id,
+          nativeClipId.cast(),
+          insertionIndex,
+        ),
+        'reorder clip',
       );
     } finally {
       malloc.free(nativeClipId);

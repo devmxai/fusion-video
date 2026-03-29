@@ -292,18 +292,41 @@ class FusionVideoEngineSessionController extends ChangeNotifier {
     notifyListeners();
   }
 
+  void clearSelectedClip() {
+    if (_selectedClipId == null) {
+      return;
+    }
+    _selectedClipId = null;
+    notifyListeners();
+  }
+
   Future<void> splitSelectedClip() async {
+    return splitSelectedClipAt(currentSeconds);
+  }
+
+  Future<void> splitSelectedClipAt(double projectSeconds) async {
     final selectedClipId = _selectedClipId;
     final handle = _projectHandle;
     if (selectedClipId == null || handle == null) {
       return;
     }
 
+    final target = _findClip(selectedClipId);
+    if (target == null || target.clip.type != TimelineClipType.media) {
+      return;
+    }
+
+    final previousTracks = _tracks;
+    final previousSelectedClipId = _selectedClipId;
     final updatedTracks = <TimelineTrackData>[];
     var didSplit = false;
     final splitStamp = DateTime.now().microsecondsSinceEpoch.toString();
-    final current = currentSeconds;
+    final current = projectSeconds.clamp(0.0, durationSeconds).toDouble();
     const edgePadding = 0.05;
+    if (current <= target.start + edgePadding ||
+        current >= target.end - edgePadding) {
+      return;
+    }
 
     for (final track in _tracks) {
       var elapsed = 0.0;
@@ -321,7 +344,7 @@ class FusionVideoEngineSessionController extends ChangeNotifier {
             nextClips.add(clip);
             continue;
           }
-          final splitAt = current.clamp(start + edgePadding, end - edgePadding);
+          final splitAt = current;
           final leftDuration = splitAt - start;
           final rightDuration = end - splitAt;
           final splitGroupId = 'bridge_$splitStamp';
@@ -340,7 +363,7 @@ class FusionVideoEngineSessionController extends ChangeNotifier {
           nextClips
             ..add(leftClip)
             ..add(rightClip);
-          _selectedClipId = rightClip.id;
+          _selectedClipId = null;
           didSplit = true;
           continue;
         }
@@ -355,29 +378,35 @@ class FusionVideoEngineSessionController extends ChangeNotifier {
       return;
     }
 
-    final bridgeSeconds = current.clamp(0.0, durationSeconds).toDouble();
-    await _bridge.splitSelectedClip(
-      handle,
-      selectedClipId,
-      EngineTimelinePosition(
-        seconds: bridgeSeconds,
-        frame: (bridgeSeconds * _config.fps).round(),
-      ),
-    );
-    _tracks = await _loadTracksFromEngine(handle);
-    _selectedClipId = _findNewestClipIdByPrefix('${selectedClipId}_b_') ??
-        _findNewestClipIdByPrefix('${selectedClipId}_a_') ??
-        updatedTracks
-            .expand((track) => track.clips)
-            .map((clip) => clip.id)
-            .firstWhere(
-              (id) => _containsClipId(id),
-              orElse: () => selectedClipId,
-            );
+    _tracks = updatedTracks;
     notifyListeners();
+
+    final bridgeSeconds = current.clamp(0.0, durationSeconds).toDouble();
+    try {
+      await _bridge.splitSelectedClip(
+        handle,
+        selectedClipId,
+        EngineTimelinePosition(
+          seconds: bridgeSeconds,
+          frame: (bridgeSeconds * _config.fps).round(),
+        ),
+      );
+      _tracks = await _loadTracksFromEngine(handle);
+      _selectedClipId = null;
+      notifyListeners();
+    } catch (_) {
+      _tracks = previousTracks;
+      _selectedClipId = previousSelectedClipId;
+      notifyListeners();
+      rethrow;
+    }
   }
 
   Future<void> trimSelectedClipLeft() async {
+    return trimSelectedClipLeftAt(currentSeconds);
+  }
+
+  Future<void> trimSelectedClipLeftAt(double projectSeconds) async {
     final selectedClipId = _selectedClipId;
     final handle = _projectHandle;
     if (selectedClipId == null || handle == null) {
@@ -389,8 +418,9 @@ class FusionVideoEngineSessionController extends ChangeNotifier {
       return;
     }
 
+    final previousTracks = _tracks;
     const minDuration = 0.2;
-    final newStart = currentSeconds.clamp(
+    final newStart = projectSeconds.clamp(
       result.start,
       result.end - minDuration,
     );
@@ -399,19 +429,40 @@ class FusionVideoEngineSessionController extends ChangeNotifier {
       return;
     }
 
-    await _bridge.trimClipLeft(
-      handle,
-      selectedClipId,
-      EngineTimelinePosition(
-        seconds: newStart,
-        frame: (newStart * _config.fps).round(),
-      ),
+    final updatedTracks = List<TimelineTrackData>.from(_tracks);
+    final targetTrack = updatedTracks[result.trackIndex];
+    final nextClips = List<TimelineClipData>.from(targetTrack.clips);
+    nextClips[result.clipIndex] = result.clip.copyWith(
+      duration: result.clip.duration - delta,
+      sourceOffsetSeconds: (result.clip.sourceOffsetSeconds ?? 0) + delta,
     );
-    _tracks = await _loadTracksFromEngine(handle);
+    updatedTracks[result.trackIndex] = targetTrack.copyWith(clips: nextClips);
+    _tracks = updatedTracks;
     notifyListeners();
+
+    try {
+      await _bridge.trimClipLeft(
+        handle,
+        selectedClipId,
+        EngineTimelinePosition(
+          seconds: newStart,
+          frame: (newStart * _config.fps).round(),
+        ),
+      );
+      _tracks = await _loadTracksFromEngine(handle);
+      notifyListeners();
+    } catch (_) {
+      _tracks = previousTracks;
+      notifyListeners();
+      rethrow;
+    }
   }
 
   Future<void> trimSelectedClipRight() async {
+    return trimSelectedClipRightAt(currentSeconds);
+  }
+
+  Future<void> trimSelectedClipRightAt(double projectSeconds) async {
     final selectedClipId = _selectedClipId;
     final handle = _projectHandle;
     if (selectedClipId == null || handle == null) {
@@ -423,8 +474,9 @@ class FusionVideoEngineSessionController extends ChangeNotifier {
       return;
     }
 
+    final previousTracks = _tracks;
     const minDuration = 0.2;
-    final newEnd = currentSeconds.clamp(
+    final newEnd = projectSeconds.clamp(
       result.start + minDuration,
       result.end,
     );
@@ -434,16 +486,32 @@ class FusionVideoEngineSessionController extends ChangeNotifier {
       return;
     }
 
-    await _bridge.trimClipRight(
-      handle,
-      selectedClipId,
-      EngineTimelinePosition(
-        seconds: newEnd,
-        frame: (newEnd * _config.fps).round(),
-      ),
+    final updatedTracks = List<TimelineTrackData>.from(_tracks);
+    final targetTrack = updatedTracks[result.trackIndex];
+    final nextClips = List<TimelineClipData>.from(targetTrack.clips);
+    nextClips[result.clipIndex] = result.clip.copyWith(
+      duration: newDuration,
     );
-    _tracks = await _loadTracksFromEngine(handle);
+    updatedTracks[result.trackIndex] = targetTrack.copyWith(clips: nextClips);
+    _tracks = updatedTracks;
     notifyListeners();
+
+    try {
+      await _bridge.trimClipRight(
+        handle,
+        selectedClipId,
+        EngineTimelinePosition(
+          seconds: newEnd,
+          frame: (newEnd * _config.fps).round(),
+        ),
+      );
+      _tracks = await _loadTracksFromEngine(handle);
+      notifyListeners();
+    } catch (_) {
+      _tracks = previousTracks;
+      notifyListeners();
+      rethrow;
+    }
   }
 
   Future<void> deleteSelectedClip() async {
@@ -495,6 +563,57 @@ class FusionVideoEngineSessionController extends ChangeNotifier {
     _selectedClipId =
         _findNewestClipIdByPrefix('${selectedClipId}_copy_') ?? duplicateId;
     notifyListeners();
+  }
+
+  Future<void> reorderClipInTrack(
+    String clipId, {
+    required int insertionIndex,
+  }) async {
+    final handle = _projectHandle;
+    if (handle == null) {
+      return;
+    }
+
+    final location = _findClip(clipId);
+    if (location == null) {
+      return;
+    }
+
+    final targetTrack = _tracks[location.trackIndex];
+    if (targetTrack.clips.length <= 1) {
+      _selectedClipId = clipId;
+      notifyListeners();
+      return;
+    }
+
+    final nextClips = List<TimelineClipData>.from(targetTrack.clips);
+    final movedClip = nextClips.removeAt(location.clipIndex);
+    final normalizedIndex = insertionIndex.clamp(0, nextClips.length).toInt();
+    if (normalizedIndex == location.clipIndex) {
+      _selectedClipId = clipId;
+      notifyListeners();
+      return;
+    }
+
+    final previousTracks = _tracks;
+    nextClips.insert(normalizedIndex, movedClip);
+    final updatedTracks = List<TimelineTrackData>.from(_tracks);
+    updatedTracks[location.trackIndex] = targetTrack.copyWith(clips: nextClips);
+    _tracks = updatedTracks;
+    _selectedClipId = clipId;
+    notifyListeners();
+
+    try {
+      await _bridge.reorderClip(handle, clipId, normalizedIndex);
+      _tracks = await _loadTracksFromEngine(handle);
+      _selectedClipId = clipId;
+      notifyListeners();
+    } catch (_) {
+      _tracks = previousTracks;
+      _selectedClipId = clipId;
+      notifyListeners();
+      rethrow;
+    }
   }
 
   Future<void> setSelectedClipGain(double gain) async {

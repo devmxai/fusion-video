@@ -134,10 +134,12 @@ class FusionVideoEngineStub implements FusionVideoEngineBridge {
       return;
     }
 
-    final splitAt = position.seconds.clamp(
-      location.startSeconds + edgePadding,
-      location.endSeconds - edgePadding,
-    );
+    if (position.seconds <= location.startSeconds + edgePadding ||
+        position.seconds >= location.endSeconds - edgePadding) {
+      return;
+    }
+
+    final splitAt = position.seconds;
     final leftDuration = splitAt - location.startSeconds;
     final rightDuration = location.endSeconds - splitAt;
     final stamp = _nextEditId++;
@@ -307,6 +309,32 @@ class FusionVideoEngineStub implements FusionVideoEngineBridge {
       handle.id,
       location.trackIndex,
       EngineTimelineTrackSnapshot(kind: location.track.kind, clips: nextClips),
+    );
+  }
+
+  @override
+  Future<void> reorderClip(
+    EngineProjectHandle handle,
+    String clipId,
+    int insertionIndex,
+  ) async {
+    final location = _findClip(handle.id, clipId);
+    if (location == null) {
+      return;
+    }
+
+    final nextClips =
+        List<EngineTimelineClipSnapshot>.from(location.track.clips);
+    final movedClip = nextClips.removeAt(location.clipIndex);
+    final normalizedIndex = insertionIndex.clamp(0, nextClips.length);
+    nextClips.insert(normalizedIndex, movedClip);
+    _replaceTrack(
+      handle.id,
+      location.trackIndex,
+      EngineTimelineTrackSnapshot(
+        kind: location.track.kind,
+        clips: nextClips,
+      ),
     );
   }
 

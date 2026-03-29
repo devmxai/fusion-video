@@ -157,6 +157,7 @@ class PreviewSource {
 class PreviewBackendState {
   const PreviewBackendState({
     this.source,
+    this.upcomingSource,
     this.compositionNodes = const <PreviewCompositionNode>[],
     this.audioNodes = const <PreviewAudioNode>[],
     this.projectWidth,
@@ -173,6 +174,7 @@ class PreviewBackendState {
   });
 
   final PreviewSource? source;
+  final PreviewSource? upcomingSource;
   final List<PreviewCompositionNode> compositionNodes;
   final List<PreviewAudioNode> audioNodes;
   final int? projectWidth;
@@ -198,6 +200,8 @@ class PreviewBackendState {
   PreviewBackendState copyWith({
     PreviewSource? source,
     bool clearSource = false,
+    PreviewSource? upcomingSource,
+    bool clearUpcomingSource = false,
     List<PreviewCompositionNode>? compositionNodes,
     List<PreviewAudioNode>? audioNodes,
     int? projectWidth,
@@ -217,6 +221,8 @@ class PreviewBackendState {
   }) {
     return PreviewBackendState(
       source: clearSource ? null : (source ?? this.source),
+      upcomingSource:
+          clearUpcomingSource ? null : (upcomingSource ?? this.upcomingSource),
       compositionNodes: compositionNodes ?? this.compositionNodes,
       audioNodes: audioNodes ?? this.audioNodes,
       projectWidth: projectWidth ?? this.projectWidth,
@@ -249,6 +255,12 @@ abstract class FusionPreviewBackend extends ChangeNotifier {
   Future<void> attachSource(
     PreviewSource? source, {
     bool autoplay = false,
+    PreviewSource? upcomingSource,
+  });
+
+  Future<void> updateSource(
+    PreviewSource? source, {
+    PreviewSource? upcomingSource,
   });
 
   Future<void> updateCompositionScene({

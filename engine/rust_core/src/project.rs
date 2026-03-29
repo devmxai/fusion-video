@@ -177,10 +177,13 @@ impl ProjectState {
             return false;
         }
 
-        let split_at = current_seconds.clamp(
-            location.start_seconds + edge_padding,
-            location.end_seconds - edge_padding,
-        );
+        if current_seconds <= location.start_seconds + edge_padding
+            || current_seconds >= location.end_seconds - edge_padding
+        {
+            return false;
+        }
+
+        let split_at = current_seconds;
         let left_duration = split_at - location.start_seconds;
         let right_duration = location.end_seconds - split_at;
 
@@ -299,6 +302,23 @@ impl ProjectState {
         self.tracks[location.track_index]
             .clips
             .insert(location.clip_index + 1, duplicate);
+        self.recompute_duration_seconds();
+        true
+    }
+
+    pub fn reorder_clip(&mut self, clip_id: &str, insertion_index: usize) -> bool {
+        let Some(location) = self.find_clip(clip_id) else {
+            return false;
+        };
+
+        let clips = &mut self.tracks[location.track_index].clips;
+        if clips.len() <= 1 {
+            return true;
+        }
+
+        let moved_clip = clips.remove(location.clip_index);
+        let normalized_index = insertion_index.min(clips.len());
+        clips.insert(normalized_index, moved_clip);
         self.recompute_duration_seconds();
         true
     }
@@ -476,12 +496,8 @@ impl ProjectState {
                 let fade_duration_seconds = AUDIO_FADE_DURATION_SECONDS
                     .min((end_seconds - start_seconds) / 2.0)
                     .max(0.0);
-                let gain_envelope = audio_envelope_at(
-                    seconds,
-                    start_seconds,
-                    end_seconds,
-                    fade_duration_seconds,
-                );
+                let gain_envelope =
+                    audio_envelope_at(seconds, start_seconds, end_seconds, fade_duration_seconds);
 
                 nodes.push(AudioNodeState {
                     clip_id: clip.id.clone(),
@@ -811,6 +827,27 @@ mod tests {
     }
 
     #[test]
+    fn split_rejects_positions_outside_selected_clip_body() {
+        let mut project = project();
+        assert!(project.insert_clip(TrackKind::Video, "video-1", "video-1", 3.0, true));
+        assert!(project.insert_clip(TrackKind::Video, "video-2", "video-2", 2.0, true));
+
+        assert!(!project.split_clip("video-2", 1.0));
+
+        let video_track = project
+            .tracks
+            .iter()
+            .find(|track| track.kind == TrackKind::Video)
+            .unwrap();
+        let ids = video_track
+            .clips
+            .iter()
+            .map(|clip| clip.id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, vec!["video-1", "video-2"]);
+    }
+
+    #[test]
     fn trims_delete_and_duplicate_work() {
         let mut project = project();
         assert!(project.insert_clip(TrackKind::Video, "video-1", "video-1", 3.15, true));
@@ -830,5 +867,27 @@ mod tests {
         assert_eq!(video_track.clips.len(), 2);
         assert!(video_track.clips[1].id.contains("_copy_"));
         assert!((video_track.clips[0].duration_seconds - 1.5).abs() < 0.001);
+    }
+
+    #[test]
+    fn reorders_clips_using_insertion_slots() {
+        let mut project = project();
+        assert!(project.insert_clip(TrackKind::Video, "video-1", "video-1", 1.0, true));
+        assert!(project.insert_clip(TrackKind::Video, "video-2", "video-2", 1.0, true));
+        assert!(project.insert_clip(TrackKind::Video, "video-3", "video-3", 1.0, true));
+
+        assert!(project.reorder_clip("video-1", 2));
+
+        let video_track = project
+            .tracks
+            .iter()
+            .find(|track| track.kind == TrackKind::Video)
+            .unwrap();
+        let ids = video_track
+            .clips
+            .iter()
+            .map(|clip| clip.id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, vec!["video-2", "video-3", "video-1"]);
     }
 }

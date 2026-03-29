@@ -6,7 +6,7 @@ void main() {
   testWidgets('renders mobile editor shell', (WidgetTester tester) async {
     await tester.pumpWidget(const FxFlutterEditorApp());
 
-    expect(find.text('Video'), findsWidgets);
+    expect(find.text('Add'), findsOneWidget);
     expect(find.text('Lip Sync'), findsOneWidget);
   });
 }
