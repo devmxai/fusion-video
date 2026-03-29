@@ -8,9 +8,11 @@ class FusionPreviewSurface extends StatelessWidget {
   const FusionPreviewSurface({
     super.key,
     required this.projectId,
+    this.useAndroidEngineSurface = false,
   });
 
   final int projectId;
+  final bool useAndroidEngineSurface;
 
   @override
   Widget build(BuildContext context) {
@@ -32,7 +34,9 @@ class FusionPreviewSurface extends StatelessWidget {
     }
 
     return AndroidView(
-      viewType: 'fusion_video/preview_surface',
+      viewType: useAndroidEngineSurface
+          ? 'fusion_video/preview_surface_engine'
+          : 'fusion_video/preview_surface',
       layoutDirection: TextDirection.ltr,
       creationParams: creationParams,
       creationParamsCodec: const StandardMessageCodec(),

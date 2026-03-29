@@ -354,13 +354,25 @@ class FusionVideoFfiBridge implements FusionVideoEngineBridge {
 
     final snapshot = _readSnapshot(handleId);
     final previous = feed.lastSnapshot;
+    final playbackStateChanged =
+        previous == null || previous.playbackState != snapshot.playbackState;
     final secondChangedWhileStopped = previous != null &&
         snapshot.playbackState != EnginePlaybackState.playing &&
         (previous.position.seconds - snapshot.position.seconds).abs() > 0.0001;
+    final now = DateTime.now();
+    final shouldThrottlePlayingTick = !force &&
+        previous != null &&
+        previous.playbackState == EnginePlaybackState.playing &&
+        snapshot.playbackState == EnginePlaybackState.playing &&
+        previous.isBuffering == snapshot.isBuffering &&
+        (feed.lastPlaybackUiEmitAt == null ||
+            now.difference(feed.lastPlaybackUiEmitAt!) <
+                const Duration(milliseconds: 120));
     final changed = force ||
         previous == null ||
-        previous.playbackState != snapshot.playbackState ||
-        previous.position.frame != snapshot.position.frame ||
+        playbackStateChanged ||
+        (!shouldThrottlePlayingTick &&
+            previous.position.frame != snapshot.position.frame) ||
         secondChangedWhileStopped ||
         previous.isBuffering != snapshot.isBuffering;
 
@@ -369,6 +381,11 @@ class FusionVideoFfiBridge implements FusionVideoEngineBridge {
     }
 
     feed.lastSnapshot = snapshot;
+    if (snapshot.playbackState == EnginePlaybackState.playing) {
+      feed.lastPlaybackUiEmitAt = now;
+    } else {
+      feed.lastPlaybackUiEmitAt = null;
+    }
     feed.controller.add(snapshot);
   }
 
@@ -830,6 +847,7 @@ class _FfiProjectFeed {
       StreamController<EngineStatusSnapshot>.broadcast();
   Timer? timer;
   EngineStatusSnapshot? lastSnapshot;
+  DateTime? lastPlaybackUiEmitAt;
 
   void dispose() {
     timer?.cancel();

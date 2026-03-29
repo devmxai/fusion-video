@@ -4,6 +4,7 @@ import android.graphics.BitmapFactory
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Color
+import android.graphics.Matrix
 import android.graphics.SurfaceTexture
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
@@ -51,6 +52,13 @@ class MainActivity : FlutterActivity() {
             .registerViewFactory(
                 "fusion_video/preview_surface",
                 FusionPreviewViewFactory(),
+            )
+        flutterEngine
+            .platformViewsController
+            .registry
+            .registerViewFactory(
+                "fusion_video/preview_surface_engine",
+                FusionEnginePreviewViewFactory(previewEngine),
             )
 
         MethodChannel(
@@ -367,10 +375,14 @@ private object FusionMediaProbe {
                     val height =
                         retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)
                             ?.toIntOrNull()
+                    val rotationDegrees =
+                        retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)
+                            ?.toIntOrNull() ?: 0
+                    val isQuarterTurn = rotationDegrees % 180 != 0
                     buildMap<String, Any> {
                         put("durationSeconds", durationMs / 1000.0)
-                        if (width != null) put("width", width)
-                        if (height != null) put("height", height)
+                        if (width != null) put("width", if (isQuarterTurn) height ?: width else width)
+                        if (height != null) put("height", if (isQuarterTurn) width ?: height else height)
                     }
                 } finally {
                     retriever.release()
@@ -422,21 +434,28 @@ private object FusionMediaThumbnailGenerator {
         val retriever = MediaMetadataRetriever()
         return try {
             retriever.setDataSource(path)
+            val rotationDegrees =
+                retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)
+                    ?.toIntOrNull() ?: 0
             timestampsSeconds.mapNotNull { seconds ->
                 val frame = retriever.getFrameAtTime(
                     (seconds.coerceAtLeast(0.0) * 1_000_000L).toLong(),
-                    MediaMetadataRetriever.OPTION_CLOSEST_SYNC,
+                    MediaMetadataRetriever.OPTION_CLOSEST,
                 ) ?: return@mapNotNull null
-                val scaled = Bitmap.createScaledBitmap(
-                    frame,
-                    targetWidth.coerceAtLeast(24),
-                    targetHeight.coerceAtLeast(24),
-                    true,
-                )
+                val rotated = rotateBitmap(frame, rotationDegrees)
+                val scaled =
+                    scaleBitmapToFill(
+                        rotated,
+                        targetWidth.coerceAtLeast(24),
+                        targetHeight.coerceAtLeast(24),
+                    )
                 val buffer = ByteArrayOutputStream()
-                scaled.compress(Bitmap.CompressFormat.JPEG, 72, buffer)
-                if (scaled != frame) {
+                scaled.compress(Bitmap.CompressFormat.PNG, 100, buffer)
+                if (scaled !== rotated) {
                     scaled.recycle()
+                }
+                if (rotated !== frame) {
+                    rotated.recycle()
                 }
                 frame.recycle()
                 buffer.toByteArray()
@@ -445,9 +464,58 @@ private object FusionMediaThumbnailGenerator {
             retriever.release()
         }
     }
+
+    private fun rotateBitmap(bitmap: Bitmap, rotationDegrees: Int): Bitmap {
+        val normalized = ((rotationDegrees % 360) + 360) % 360
+        if (normalized == 0) {
+            return bitmap
+        }
+        val matrix =
+            Matrix().apply {
+                postRotate(normalized.toFloat())
+            }
+        return Bitmap.createBitmap(
+            bitmap,
+            0,
+            0,
+            bitmap.width,
+            bitmap.height,
+            matrix,
+            true,
+        )
+    }
+
+    private fun scaleBitmapToFill(
+        bitmap: Bitmap,
+        targetWidth: Int,
+        targetHeight: Int,
+    ): Bitmap {
+        val scale =
+            maxOf(
+                targetWidth.toFloat() / bitmap.width.toFloat().coerceAtLeast(1f),
+                targetHeight.toFloat() / bitmap.height.toFloat().coerceAtLeast(1f),
+            )
+        val scaledWidth = (bitmap.width.toFloat() * scale).roundToInt().coerceAtLeast(1)
+        val scaledHeight = (bitmap.height.toFloat() * scale).roundToInt().coerceAtLeast(1)
+        val scaled =
+            if (bitmap.width == scaledWidth && bitmap.height == scaledHeight) {
+                bitmap
+            } else {
+                Bitmap.createScaledBitmap(bitmap, scaledWidth, scaledHeight, true)
+            }
+        val offsetX = ((scaledWidth - targetWidth) / 2).coerceAtLeast(0)
+        val offsetY = ((scaledHeight - targetHeight) / 2).coerceAtLeast(0)
+        return Bitmap.createBitmap(
+            scaled,
+            offsetX,
+            offsetY,
+            targetWidth.coerceAtMost(scaled.width).coerceAtLeast(1),
+            targetHeight.coerceAtMost(scaled.height).coerceAtLeast(1),
+        )
+    }
 }
 
-private object FusionPreviewRegistry {
+object FusionPreviewRegistry {
     private val views = mutableMapOf<Int, MutableList<FusionPreviewNativeView>>()
     private val payloads = mutableMapOf<Int, FusionPreviewPayload>()
     private val runtimeStates = mutableMapOf<Int, FusionPreviewRuntimeState>()
@@ -715,7 +783,7 @@ private data class FusionPreviewPayload(
     val isPlaying: Boolean,
 )
 
-private data class FusionPreviewRuntimeState(
+data class FusionPreviewRuntimeState(
     val positionSeconds: Double,
     val isPlaying: Boolean,
     val transportRevision: Int,
@@ -748,7 +816,7 @@ private class FusionPreviewPlatformView(
     }
 }
 
-private class FusionPreviewNativeView(
+class FusionPreviewNativeView(
     context: Context,
     private val projectId: Int,
 ) : FrameLayout(context), TextureView.SurfaceTextureListener {
@@ -1517,7 +1585,8 @@ private class FusionPreviewNativeView(
 
     private fun reportRuntimeState(force: Boolean = false) {
         val now = SystemClock.elapsedRealtime()
-        if (!force && now - lastRuntimeEmitRealtimeMs < 33L) {
+        val minEmitIntervalMs = if (isCurrentlyPlaying) 180L else 33L
+        if (!force && now - lastRuntimeEmitRealtimeMs < minEmitIntervalMs) {
             return
         }
         lastRuntimeEmitRealtimeMs = now

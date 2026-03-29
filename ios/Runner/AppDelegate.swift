@@ -347,7 +347,7 @@ private enum FusionMediaThumbnailGenerator {
         continue
       }
       let image = UIImage(cgImage: cgImage)
-      guard let data = image.jpegData(compressionQuality: 0.72) else {
+      guard let data = image.pngData() else {
         continue
       }
       thumbnails.append(FlutterStandardTypedData(bytes: data))
@@ -1957,7 +1957,8 @@ private final class FusionPreviewNativeView: UIView {
 
   private func reportRuntimeState(force: Bool = false) {
     let now = CACurrentMediaTime()
-    if !force && (now - lastRuntimeEmitTime) < (1.0 / 30.0) {
+    let minEmitInterval = isCurrentlyPlaying ? 0.18 : (1.0 / 30.0)
+    if !force && (now - lastRuntimeEmitTime) < minEmitInterval {
       return
     }
     lastRuntimeEmitTime = now

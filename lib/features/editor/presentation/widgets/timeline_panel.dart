@@ -911,6 +911,8 @@ class _TimelinePanelState extends State<TimelinePanel> {
                                                       secondsWidth:
                                                           _secondsWidth,
                                                       track: widget.tracks[i],
+                                                      isPlaying:
+                                                          widget.isPlaying,
                                                       selectedClipId:
                                                           widget.selectedClipId,
                                                       onClipSelected:
@@ -1009,6 +1011,7 @@ class _TimelineTrackRow extends StatelessWidget {
     required this.rowHeight,
     required this.secondsWidth,
     required this.track,
+    required this.isPlaying,
     required this.selectedClipId,
     required this.onClipSelected,
     required this.onClipLongPressStart,
@@ -1025,6 +1028,7 @@ class _TimelineTrackRow extends StatelessWidget {
   final double rowHeight;
   final double secondsWidth;
   final TimelineTrackData track;
+  final bool isPlaying;
   final String? selectedClipId;
   final ValueChanged<String> onClipSelected;
   final ValueChanged<TimelineClipData>? onClipLongPressStart;
@@ -1106,6 +1110,7 @@ class _TimelineTrackRow extends StatelessWidget {
                   tone: clip.tone,
                   icon: _clipIcon,
                   trackKind: track.kind,
+                  isPlaying: isPlaying,
                   assetPath: assetPath,
                   sourceOffsetSeconds: clip.sourceOffsetSeconds ?? 0,
                   durationSeconds: clip.duration,
@@ -1299,6 +1304,7 @@ class _TimelineReorderTrackRow extends StatelessWidget {
       tone: clip.tone,
       icon: _clipIcon,
       trackKind: track.kind,
+      isPlaying: false,
       assetPath: assetPath,
       sourceOffsetSeconds: clip.sourceOffsetSeconds ?? 0,
       durationSeconds: clip.duration,
@@ -1417,6 +1423,7 @@ class _TimelineMediaClip extends StatelessWidget {
     required this.tone,
     required this.icon,
     required this.trackKind,
+    required this.isPlaying,
     required this.assetPath,
     required this.sourceOffsetSeconds,
     required this.durationSeconds,
@@ -1433,6 +1440,7 @@ class _TimelineMediaClip extends StatelessWidget {
   final TimelineClipTone tone;
   final IconData icon;
   final TimelineTrackKind trackKind;
+  final bool isPlaying;
   final String? assetPath;
   final double sourceOffsetSeconds;
   final double durationSeconds;
@@ -1494,6 +1502,7 @@ class _TimelineMediaClip extends StatelessWidget {
               if (hasVideoFrames)
                 _TimelineVideoFilmstrip(
                   path: assetPath!,
+                  isPlaying: isPlaying,
                   width: width,
                   height: height,
                   sourceOffsetSeconds: sourceOffsetSeconds,
@@ -1562,6 +1571,7 @@ class _TimelineImageFill extends StatelessWidget {
 class _TimelineVideoFilmstrip extends StatefulWidget {
   const _TimelineVideoFilmstrip({
     required this.path,
+    required this.isPlaying,
     required this.width,
     required this.height,
     required this.sourceOffsetSeconds,
@@ -1569,6 +1579,7 @@ class _TimelineVideoFilmstrip extends StatefulWidget {
   });
 
   final String path;
+  final bool isPlaying;
   final double width;
   final double height;
   final double sourceOffsetSeconds;
@@ -1587,6 +1598,13 @@ class _TimelineVideoFilmstripState extends State<_TimelineVideoFilmstrip> {
 
   int get _tileCount => math.max(2, (widget.width / 54).ceil());
 
+  int get _targetWidth {
+    final tileWidth = widget.width / _tileCount;
+    return math.max(96, (tileWidth * 2).round());
+  }
+
+  int get _targetHeight => math.max(68, (widget.height * 2).round());
+
   @override
   void initState() {
     super.initState();
@@ -1597,6 +1615,7 @@ class _TimelineVideoFilmstripState extends State<_TimelineVideoFilmstrip> {
   void didUpdateWidget(covariant _TimelineVideoFilmstrip oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.path != widget.path ||
+        oldWidget.isPlaying != widget.isPlaying ||
         (oldWidget.width - widget.width).abs() > 0.5 ||
         (oldWidget.height - widget.height).abs() > 0.5 ||
         (oldWidget.sourceOffsetSeconds - widget.sourceOffsetSeconds).abs() >
@@ -1608,6 +1627,10 @@ class _TimelineVideoFilmstripState extends State<_TimelineVideoFilmstrip> {
 
   void _refreshThumbnails() {
     _seedThumbnails = _TimelineFilmstripCache.peekForPath(widget.path);
+    if (widget.isPlaying && _seedThumbnails != null && _seedThumbnails!.isNotEmpty) {
+      _thumbnailsFuture = null;
+      return;
+    }
     final timestamps = List<double>.generate(_tileCount, (index) {
       final fraction = (index + 0.5) / _tileCount;
       return widget.sourceOffsetSeconds + (widget.durationSeconds * fraction);
@@ -1619,8 +1642,8 @@ class _TimelineVideoFilmstripState extends State<_TimelineVideoFilmstrip> {
         sourceOffsetSeconds: widget.sourceOffsetSeconds,
         durationSeconds: widget.durationSeconds,
         tileCount: _tileCount,
-        targetWidth: 72,
-        targetHeight: widget.height.round(),
+        targetWidth: _targetWidth,
+        targetHeight: _targetHeight,
         timestampsSeconds: timestamps,
       ),
     );
@@ -1678,7 +1701,7 @@ class _TimelineVideoFilmstripState extends State<_TimelineVideoFilmstrip> {
                 child: Image.memory(
                   thumbnails[index % thumbnails.length],
                   fit: BoxFit.cover,
-                  filterQuality: FilterQuality.low,
+                  filterQuality: FilterQuality.medium,
                   gaplessPlayback: true,
                 ),
               ),
@@ -1788,28 +1811,35 @@ class _TimelineFilmstripCache {
     return _entries.putIfAbsent(
       key,
       () async {
-        if (missingTimestamps.isNotEmpty) {
-          final generated =
-              await NativeMediaThumbnailer.generateVideoThumbnails(
-            path: path,
-            timestampsSeconds: missingTimestamps,
-            targetWidth: targetWidth,
-            targetHeight: targetHeight,
-          );
-          final resolvedCount =
-              math.min(generated.length, missingFrameKeys.length);
-          for (var i = 0; i < resolvedCount; i++) {
-            _frameEntries[missingFrameKeys[i]] = generated[i];
+        try {
+          if (missingTimestamps.isNotEmpty) {
+            final generated =
+                await NativeMediaThumbnailer.generateVideoThumbnails(
+              path: path,
+              timestampsSeconds: missingTimestamps,
+              targetWidth: targetWidth,
+              targetHeight: targetHeight,
+            );
+            final resolvedCount =
+                math.min(generated.length, missingFrameKeys.length);
+            for (var i = 0; i < resolvedCount; i++) {
+              _frameEntries[missingFrameKeys[i]] = generated[i];
+            }
           }
+          final thumbnails = <Uint8List>[
+            for (final frameKey in frameKeys)
+              if (_frameEntries[frameKey] case final bytes?) bytes,
+          ];
+          if (thumbnails.isNotEmpty) {
+            _pathEntries[path] = List<Uint8List>.unmodifiable(thumbnails);
+          } else {
+            _entries.remove(key);
+          }
+          return thumbnails;
+        } catch (_) {
+          _entries.remove(key);
+          rethrow;
         }
-        final thumbnails = <Uint8List>[
-          for (final frameKey in frameKeys)
-            if (_frameEntries[frameKey] case final bytes?) bytes,
-        ];
-        if (thumbnails.isNotEmpty) {
-          _pathEntries[path] = List<Uint8List>.unmodifiable(thumbnails);
-        }
-        return thumbnails;
       },
     );
   }

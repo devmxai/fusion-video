@@ -344,7 +344,11 @@ These issues are currently considered active and unresolved:
 - On Android, pressing `play` after pausing and moving the playhead forward can still restart from the beginning of the source instead of respecting the new timeline position
 - Split clips are still not fully trustworthy as real timeline segments: after `split`, some playback paths still behave as if each resulting part is reading from the source start rather than its true clip-local offset
 - On Android, horizontal timeline scrubbing can move the UI ruler/track while the preview canvas lags behind the finger and does not update with the same smoothness seen on iOS simulator
+- On Android, imported `portrait` video can still appear with incorrect canvas sizing or side black bars instead of respecting the expected project fit immediately
+- Base-clip canvas transforms on Android are not yet production-safe in the new engine surface path: zoom / pan / natural media framing can still diverge from the intended scene transform
+- Timeline video filmstrips on Android can still load slowly, appear broken, or show visually incorrect frames while preview playback is under load
 - During playback, the visible video motion can still show small jitter / unstable movement instead of steady frame-to-frame transport
+- Android playback quality is still below acceptable editor-grade smoothness: inserted video can stutter heavily, audio can cut in and out, and the preview can take too long to stabilize after import or play
 - Native preview behavior is not yet fully symmetric between iOS and Android
 - Android export is still not implemented; export foundation currently exists on iOS first
 - The Rust engine is connected through FFI, but real production playback/rendering is still only partially delegated to the engine
@@ -505,7 +509,11 @@ Current symptoms under active investigation:
 - after `pause -> seek forward -> play`, playback can still jump back to the beginning of the source instead of starting from the requested timeline time
 - after `split`, each resulting clip can still behave as if it is not fully anchored to its real timeline/source offset, which makes cuts feel visually incorrect and not truly timeline-accurate
 - on Android specifically, timeline scrolling/scrubbing can move the timeline UI while the preview canvas trails behind and does not track the finger with iOS-level smoothness
+- on Android specifically, imported `portrait` media can still render with incorrect framing, delayed stabilization, or side black bars instead of matching the intended canvas fit immediately
+- on Android specifically, the experimental engine-surface path still has unstable base-media layout semantics, so zoom / pan / natural framing are not yet reliable for the primary visual clip
+- on Android specifically, timeline filmstrip thumbnails can still decode too slowly or display malformed-looking frames during editor interaction
 - even when playback starts correctly, motion on the preview surface can still show small jitter / instability during transport
+- even after recent Android engine-surface work, plain video playback can still be catastrophically choppy on device, with severe video hitching and intermittent audio dropouts after inserting a clip into the timeline
 
 Important clarification:
 

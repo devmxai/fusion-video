@@ -311,6 +311,7 @@ class _MobileEditorScreenState extends State<MobileEditorScreen> {
     if (handle != null) {
       unawaited(_previewBackend.bindProject(handle.id));
     }
+    var shouldRebuild = false;
     final timelinePreviewSeconds = _timelinePreviewSeconds;
     if (timelinePreviewSeconds != null) {
       final didCatchUp =
@@ -318,6 +319,7 @@ class _MobileEditorScreenState extends State<MobileEditorScreen> {
               0.05;
       if (!_isTimelineScrubbing || _engineController.isPlaying || didCatchUp) {
         _timelinePreviewSeconds = null;
+        shouldRebuild = true;
       }
     }
     if (!_isApplyingTimelineEdit &&
@@ -329,7 +331,9 @@ class _MobileEditorScreenState extends State<MobileEditorScreen> {
       return;
     }
 
-    setState(() {});
+    if (shouldRebuild || !_engineController.isPlaying) {
+      setState(() {});
+    }
   }
 
   bool _shouldRefreshPreviewScene() {
@@ -746,13 +750,20 @@ class _MobileEditorScreenState extends State<MobileEditorScreen> {
     }
 
     final previewState = _previewBackend.state;
+    var shouldRebuild = false;
     if (previewState.contentSize != null &&
         previewState.contentSize!.width > 0 &&
         previewState.contentSize!.height > 0) {
-      _workspaceSize = previewState.contentSize;
+      final nextSize = previewState.contentSize;
+      if (_workspaceSize != nextSize) {
+        _workspaceSize = nextSize;
+        shouldRebuild = true;
+      }
     }
 
-    setState(() {});
+    if (shouldRebuild || !previewState.isPlaying) {
+      setState(() {});
+    }
   }
 
   void _handleTimelineScrubStateChanged(bool isActive) {
@@ -1158,6 +1169,21 @@ class _MobileEditorScreenState extends State<MobileEditorScreen> {
     final assetId = _deviceAssetId(asset);
     final label = await DeviceMediaLibrary.resolveTitle(asset);
     final existing = _findAssetById(assetId);
+    double? resolvedDurationSeconds = asset.durationSeconds;
+    int? resolvedWidth = asset.width > 0 ? asset.width : null;
+    int? resolvedHeight = asset.height > 0 ? asset.height : null;
+    if (asset.tab == EditorMediaTab.video) {
+      final metadata = await EditorMediaSupport.readVideoMetadataWithRetry(
+        localFile.path,
+      );
+      resolvedDurationSeconds = metadata.durationSeconds ?? resolvedDurationSeconds;
+      resolvedWidth = metadata.width ?? resolvedWidth;
+      resolvedHeight = metadata.height ?? resolvedHeight;
+    } else if (asset.tab == EditorMediaTab.image) {
+      final metadata = await EditorMediaSupport.readImageMetadata(localFile.path);
+      resolvedWidth = metadata.width ?? resolvedWidth;
+      resolvedHeight = metadata.height ?? resolvedHeight;
+    }
     final baseAsset = existing ??
         MockAssetItem(
           id: assetId,
@@ -1171,11 +1197,11 @@ class _MobileEditorScreenState extends State<MobileEditorScreen> {
       localPath: localFile.path,
       isImported: true,
       durationSeconds:
-          asset.durationSeconds != null && asset.durationSeconds! > 0
-              ? asset.durationSeconds
+          resolvedDurationSeconds != null && resolvedDurationSeconds > 0
+              ? resolvedDurationSeconds
               : baseAsset.durationSeconds,
-      width: asset.width > 0 ? asset.width : baseAsset.width,
-      height: asset.height > 0 ? asset.height : baseAsset.height,
+      width: resolvedWidth ?? baseAsset.width,
+      height: resolvedHeight ?? baseAsset.height,
     );
     _upsertAsset(updatedAsset);
     await _ensureEngineAssetImported(updatedAsset);
@@ -1341,12 +1367,6 @@ class _MobileEditorScreenState extends State<MobileEditorScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final currentSeconds = _effectiveCurrentSeconds;
-    final isPlaying = _effectiveIsPlaying;
-    final tracks = _engineController.tracks;
-    final selectedClipId = _engineController.selectedClipId;
-    final hasSelectedClip = selectedClipId != null;
-
     return Scaffold(
       body: SafeArea(
         bottom: false,
@@ -1365,9 +1385,11 @@ class _MobileEditorScreenState extends State<MobileEditorScreen> {
                     flex: 4,
                     child: ConstrainedBox(
                       constraints: const BoxConstraints(minHeight: 220),
-                      child: PreviewStage(
-                        workspaceAspectRatio: _workspaceAspectRatio,
-                        child: _previewBackend.buildView(),
+                      child: RepaintBoundary(
+                        child: PreviewStage(
+                          workspaceAspectRatio: _workspaceAspectRatio,
+                          child: _previewBackend.buildView(),
+                        ),
                       ),
                     ),
                   ),
@@ -1384,108 +1406,125 @@ class _MobileEditorScreenState extends State<MobileEditorScreen> {
                           width: 1,
                         ),
                       ),
-                      child: Column(
-                        children: [
-                          Padding(
-                            padding: const EdgeInsets.fromLTRB(4, 4, 4, 3),
-                            child: EditorToolsBar(
-                              embedded: true,
-                              isPlaying: isPlaying,
-                              onSplit: hasSelectedClip
-                                  ? () => _runTimelineEdit(
-                                        () => _engineController
-                                            .splitSelectedClipAt(
-                                          _effectiveCurrentSeconds,
+                      child: AnimatedBuilder(
+                        animation: Listenable.merge([
+                          _engineController,
+                          _previewBackend,
+                        ]),
+                        builder: (context, _) {
+                          final currentSeconds = _effectiveCurrentSeconds;
+                          final isPlaying = _effectiveIsPlaying;
+                          final tracks = _engineController.tracks;
+                          final selectedClipId =
+                              _engineController.selectedClipId;
+                          final hasSelectedClip = selectedClipId != null;
+                          return Column(
+                            children: [
+                              Padding(
+                                padding: const EdgeInsets.fromLTRB(4, 4, 4, 3),
+                                child: EditorToolsBar(
+                                  embedded: true,
+                                  isPlaying: isPlaying,
+                                  onSplit: hasSelectedClip
+                                      ? () => _runTimelineEdit(
+                                            () => _engineController
+                                                .splitSelectedClipAt(
+                                              _effectiveCurrentSeconds,
+                                            ),
+                                          )
+                                      : null,
+                                  onTrimRight: hasSelectedClip
+                                      ? () => _runTimelineEdit(
+                                            () => _engineController
+                                                .trimSelectedClipRightAt(
+                                              _effectiveCurrentSeconds,
+                                            ),
+                                          )
+                                      : null,
+                                  onTrimLeft: hasSelectedClip
+                                      ? () => _runTimelineEdit(
+                                            () => _engineController
+                                                .trimSelectedClipLeftAt(
+                                              _effectiveCurrentSeconds,
+                                            ),
+                                          )
+                                      : null,
+                                  onDuplicate: hasSelectedClip
+                                      ? () => _runTimelineEdit(
+                                            _engineController
+                                                .duplicateSelectedClip,
+                                          )
+                                      : null,
+                                  onDelete: hasSelectedClip
+                                      ? () => _runTimelineEdit(
+                                            _engineController.deleteSelectedClip,
+                                          )
+                                      : null,
+                                  onPlayToggle: _togglePlayback,
+                                ),
+                              ),
+                              Divider(
+                                height: 1,
+                                thickness: 1,
+                                color: FxPalette.dividerSoft.withOpacity(0.9),
+                              ),
+                              Expanded(
+                                child: Padding(
+                                  padding: const EdgeInsets.fromLTRB(0, 2, 0, 0),
+                                  child: RepaintBoundary(
+                                    child: TimelinePanel(
+                                      embedded: true,
+                                      tracks: tracks,
+                                      currentSeconds: currentSeconds,
+                                      timelineDuration: _effectiveTimelineDuration,
+                                      isPlaying: isPlaying,
+                                      selectedClipId: selectedClipId,
+                                      onTimeChanged: _setCurrentSeconds,
+                                      onClipSelected: _handleClipSelected,
+                                      onClipReorder: (clipId, insertionIndex) =>
+                                          _runTimelineEdit(
+                                        () => _engineController.reorderClipInTrack(
+                                          clipId,
+                                          insertionIndex: insertionIndex,
                                         ),
-                                      )
-                                  : null,
-                              onTrimRight: hasSelectedClip
-                                  ? () => _runTimelineEdit(
-                                        () => _engineController
-                                            .trimSelectedClipRightAt(
-                                          _effectiveCurrentSeconds,
-                                        ),
-                                      )
-                                  : null,
-                              onTrimLeft: hasSelectedClip
-                                  ? () => _runTimelineEdit(
-                                        () => _engineController
-                                            .trimSelectedClipLeftAt(
-                                          _effectiveCurrentSeconds,
-                                        ),
-                                      )
-                                  : null,
-                              onDuplicate: hasSelectedClip
-                                  ? () => _runTimelineEdit(
-                                        _engineController.duplicateSelectedClip,
-                                      )
-                                  : null,
-                              onDelete: hasSelectedClip
-                                  ? () => _runTimelineEdit(
-                                        _engineController.deleteSelectedClip,
-                                      )
-                                  : null,
-                              onPlayToggle: _togglePlayback,
-                            ),
-                          ),
-                          Divider(
-                            height: 1,
-                            thickness: 1,
-                            color: FxPalette.dividerSoft.withOpacity(0.9),
-                          ),
-                          Expanded(
-                            child: Padding(
-                              padding: const EdgeInsets.fromLTRB(0, 2, 0, 0),
-                              child: TimelinePanel(
-                                embedded: true,
-                                tracks: tracks,
-                                currentSeconds: currentSeconds,
-                                timelineDuration: _effectiveTimelineDuration,
-                                isPlaying: isPlaying,
-                                selectedClipId: selectedClipId,
-                                onTimeChanged: _setCurrentSeconds,
-                                onClipSelected: _handleClipSelected,
-                                onClipReorder: (clipId, insertionIndex) =>
-                                    _runTimelineEdit(
-                                  () => _engineController.reorderClipInTrack(
-                                    clipId,
-                                    insertionIndex: insertionIndex,
+                                      ),
+                                      onBackgroundTap:
+                                          _handleTimelineBackgroundTapped,
+                                      assetPathResolver: (assetId) {
+                                        final descriptor =
+                                            _engineController.assetForId(assetId);
+                                        if (descriptor?.uri case final uri?) {
+                                          return uri;
+                                        }
+                                        return _findAssetById(assetId)?.localPath;
+                                      },
+                                      onScrubStateChanged:
+                                          _handleTimelineScrubStateChanged,
+                                    ),
                                   ),
                                 ),
-                                onBackgroundTap:
-                                    _handleTimelineBackgroundTapped,
-                                assetPathResolver: (assetId) {
-                                  final descriptor =
-                                      _engineController.assetForId(assetId);
-                                  if (descriptor?.uri case final uri?) {
-                                    return uri;
-                                  }
-                                  return _findAssetById(assetId)?.localPath;
-                                },
-                                onScrubStateChanged:
-                                    _handleTimelineScrubStateChanged,
                               ),
-                            ),
-                          ),
-                          Divider(
-                            height: 1,
-                            thickness: 1,
-                            color: FxPalette.dividerSoft.withOpacity(0.9),
-                          ),
-                          Padding(
-                            padding: const EdgeInsets.fromLTRB(4, 3, 4, 3),
-                            child: MediaDock(
-                              activeTab: activeTab,
-                              onAddTap: () => _openVisualMediaSheet(
-                                initialTab: activeTab == EditorMediaTab.image
-                                    ? EditorMediaTab.image
-                                    : EditorMediaTab.video,
+                              Divider(
+                                height: 1,
+                                thickness: 1,
+                                color: FxPalette.dividerSoft.withOpacity(0.9),
                               ),
-                              onToolTap: _openMediaSheet,
-                              embedded: true,
-                            ),
-                          ),
-                        ],
+                              Padding(
+                                padding: const EdgeInsets.fromLTRB(4, 3, 4, 3),
+                                child: MediaDock(
+                                  activeTab: activeTab,
+                                  onAddTap: () => _openVisualMediaSheet(
+                                    initialTab: activeTab == EditorMediaTab.image
+                                        ? EditorMediaTab.image
+                                        : EditorMediaTab.video,
+                                  ),
+                                  onToolTap: _openMediaSheet,
+                                  embedded: true,
+                                ),
+                              ),
+                            ],
+                          );
+                        },
                       ),
                     ),
                   ),

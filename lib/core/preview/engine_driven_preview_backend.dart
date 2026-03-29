@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 
 import 'fusion_preview_surface.dart';
 import 'preview_backend.dart';
+import 'preview_feature_flags.dart';
 import 'preview_session_bridge.dart';
 
 class EngineDrivenPreviewBackend extends FusionPreviewBackend {
@@ -301,7 +302,10 @@ class EngineDrivenPreviewBackend extends FusionPreviewBackend {
 
   @override
   Widget buildView({BoxFit fit = BoxFit.cover}) {
-    return FusionPreviewSurface(projectId: projectId);
+    return FusionPreviewSurface(
+      projectId: projectId,
+      useAndroidEngineSurface: PreviewFeatureFlags.useAndroidEngineSurface,
+    );
   }
 
   @override
@@ -318,6 +322,28 @@ class EngineDrivenPreviewBackend extends FusionPreviewBackend {
   }
 
   void handleRuntimeEvent(PreviewRuntimeEvent event) {
+    final nextState = _state.copyWith(
+      positionSeconds: event.positionSeconds,
+      isPlaying: event.isPlaying,
+      transportRevision: event.transportRevision,
+      isBuffering: event.isBuffering,
+      isFrameReady: event.frameReady,
+      frameDropCount: event.frameDropCount,
+      audioDropCount: event.audioDropCount,
+      bufferUnderrunCount: event.bufferUnderrunCount,
+      previewLatencyMillis: event.previewLatencyMillis,
+      seekLatencyMillis: event.seekLatencyMillis,
+    );
+    final shouldNotify = !_state.isPlaying ||
+        _state.isPlaying != nextState.isPlaying ||
+        _state.isBuffering != nextState.isBuffering ||
+        _state.isFrameReady != nextState.isFrameReady ||
+        _state.frameDropCount != nextState.frameDropCount ||
+        _state.audioDropCount != nextState.audioDropCount ||
+        _state.bufferUnderrunCount != nextState.bufferUnderrunCount ||
+        (_state.previewLatencyMillis - nextState.previewLatencyMillis).abs() >
+            0.5 ||
+        (_state.seekLatencyMillis - nextState.seekLatencyMillis).abs() > 0.5;
     _state = _state.copyWith(
       positionSeconds: event.positionSeconds,
       isPlaying: event.isPlaying,
@@ -330,6 +356,8 @@ class EngineDrivenPreviewBackend extends FusionPreviewBackend {
       previewLatencyMillis: event.previewLatencyMillis,
       seekLatencyMillis: event.seekLatencyMillis,
     );
-    notifyListeners();
+    if (shouldNotify) {
+      notifyListeners();
+    }
   }
 }
