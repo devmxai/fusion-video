@@ -357,7 +357,7 @@ class FusionVideoFfiBridge implements FusionVideoEngineBridge {
     }
 
     feed.timer = Timer.periodic(
-      const Duration(milliseconds: 16),
+      const Duration(milliseconds: 33),
       (_) => _emitSnapshot(handleId),
     );
   }
@@ -739,8 +739,8 @@ class FusionVideoFfiBridge implements FusionVideoEngineBridge {
     try {
       final jsonString = pointer.toDartString();
       final decoded = jsonDecode(jsonString) as List<dynamic>;
-      return decoded.map((dynamic nodeEntry) {
-        final nodeMap = nodeEntry as Map<String, dynamic>;
+      return decoded.map<EngineAudioNodeSnapshot>((dynamic nodeEntry) {
+        final nodeMap = Map<String, dynamic>.from(nodeEntry as Map);
         return EngineAudioNodeSnapshot(
           clipId: nodeMap['clip_id'] as String,
           assetId: nodeMap['asset_id'] as String,
@@ -757,6 +757,9 @@ class FusionVideoFfiBridge implements FusionVideoEngineBridge {
           sourcePositionSeconds:
               (nodeMap['source_position_seconds'] as num).toDouble(),
           gain: (nodeMap['gain'] as num).toDouble(),
+          fadeDurationSeconds:
+              (nodeMap['fade_duration_seconds'] as num?)?.toDouble() ?? 0,
+          gainEnvelope: (nodeMap['gain_envelope'] as num?)?.toDouble() ?? 1,
           isMuted: (nodeMap['is_muted'] as bool?) ?? false,
         );
       }).toList(growable: false);

@@ -6,6 +6,7 @@ import android.graphics.Color
 import android.graphics.SurfaceTexture
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
+import android.media.AudioAttributes
 import android.media.MediaMetadataRetriever
 import android.media.MediaPlayer
 import android.os.Bundle
@@ -160,6 +161,21 @@ private object FusionMediaProbe {
                 }
             }
 
+            "audio" -> {
+                val retriever = MediaMetadataRetriever()
+                try {
+                    retriever.setDataSource(path)
+                    val durationMs =
+                        retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)
+                            ?.toDoubleOrNull() ?: 0.0
+                    mapOf(
+                        "durationSeconds" to (durationMs / 1000.0),
+                    )
+                } finally {
+                    retriever.release()
+                }
+            }
+
             "image" -> {
                 val options = BitmapFactory.Options().apply {
                     inJustDecodeBounds = true
@@ -301,6 +317,7 @@ private class FusionPreviewNativeView(
     private var currentBaseClipId: String? = null
     private var currentSelectedClipId: String? = null
     private var currentSceneNodes: List<Map<String, Any?>> = emptyList()
+    private var lastRenderedSceneKey: String = ""
     private var currentPositionSeconds: Double = 0.0
     private var isCurrentlyPlaying: Boolean = false
     private var isPrepared: Boolean = false
@@ -379,7 +396,11 @@ private class FusionPreviewNativeView(
         if (sourceChanged) {
             loadSource()
         }
-        renderCompositionScene()
+        val nextSceneKey = sceneIdentityKey()
+        if (nextSceneKey != lastRenderedSceneKey) {
+            renderCompositionScene()
+            lastRenderedSceneKey = nextSceneKey
+        }
         applyTransport()
     }
 
@@ -430,6 +451,12 @@ private class FusionPreviewNativeView(
         releasePlayer()
         isPrepared = false
         mediaPlayer = MediaPlayer().apply {
+            setAudioAttributes(
+                AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_MEDIA)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_MOVIE)
+                    .build(),
+            )
             setDataSource(path)
             setSurface(previewSurface)
             isLooping = false
@@ -574,7 +601,8 @@ private class FusionPreviewNativeView(
         if (!isPrepared) return
 
         val targetMs = clampedPositionMs(currentPositionSeconds)
-        if (kotlin.math.abs(player.currentPosition - targetMs) > 40) {
+        val seekThresholdMs = if (isCurrentlyPlaying) 180 else 40
+        if (kotlin.math.abs(player.currentPosition - targetMs) > seekThresholdMs) {
             player.seekTo(targetMs)
         }
 
@@ -629,6 +657,7 @@ private class FusionPreviewNativeView(
 
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
         super.onSizeChanged(w, h, oldw, oldh)
+        lastRenderedSceneKey = ""
         renderCompositionScene()
     }
 
@@ -642,6 +671,50 @@ private class FusionPreviewNativeView(
     }
 
     override fun onSurfaceTextureUpdated(surface: SurfaceTexture) = Unit
+
+    private fun sceneIdentityKey(): String {
+        val builder = StringBuilder()
+        builder
+            .append("pw:")
+            .append(currentProjectWidth)
+            .append("|ph:")
+            .append(currentProjectHeight)
+            .append("|base:")
+            .append(currentBaseClipId ?: "")
+            .append("|selected:")
+            .append(currentSelectedClipId ?: "")
+            .append("|count:")
+            .append(currentSceneNodes.size)
+
+        currentSceneNodes
+            .sortedBy { it["clipId"] as? String ?: "" }
+            .forEach { node ->
+                builder
+                    .append("||")
+                    .append(node["clipId"] as? String ?: "")
+                    .append('|')
+                    .append(node["kind"] as? String ?: "")
+                    .append('|')
+                    .append(node["localPath"] as? String ?: "")
+                    .append('|')
+                    .append(node["displayLabel"] as? String ?: "")
+                    .append('|')
+                    .append((node["x"] as? Number)?.toDouble() ?: 0.0)
+                    .append('|')
+                    .append((node["y"] as? Number)?.toDouble() ?: 0.0)
+                    .append('|')
+                    .append((node["width"] as? Number)?.toDouble() ?: 0.0)
+                    .append('|')
+                    .append((node["height"] as? Number)?.toDouble() ?: 0.0)
+                    .append('|')
+                    .append((node["opacity"] as? Number)?.toDouble() ?: 1.0)
+                    .append('|')
+                    .append((node["rotationDegrees"] as? Number)?.toDouble() ?: 0.0)
+                    .append('|')
+                    .append((node["zIndex"] as? Number)?.toInt() ?: 0)
+            }
+        return builder.toString()
+    }
 }
 
 private fun MediaPlayer.stopSafely() {

@@ -163,6 +163,8 @@ class PreviewBackendState {
     this.projectHeight,
     this.baseClipId,
     this.selectedClipId,
+    this.baseAudioGain = 1,
+    this.baseAudioMuted = false,
     this.isReady = false,
     this.isPlaying = false,
     this.positionSeconds = 0,
@@ -177,6 +179,8 @@ class PreviewBackendState {
   final int? projectHeight;
   final String? baseClipId;
   final String? selectedClipId;
+  final double baseAudioGain;
+  final bool baseAudioMuted;
   final bool isReady;
   final bool isPlaying;
   final double positionSeconds;
@@ -202,6 +206,8 @@ class PreviewBackendState {
     bool clearBaseClipId = false,
     String? selectedClipId,
     bool clearSelectedClipId = false,
+    double? baseAudioGain,
+    bool? baseAudioMuted,
     bool? isReady,
     bool? isPlaying,
     double? positionSeconds,
@@ -218,6 +224,8 @@ class PreviewBackendState {
       baseClipId: clearBaseClipId ? null : (baseClipId ?? this.baseClipId),
       selectedClipId:
           clearSelectedClipId ? null : (selectedClipId ?? this.selectedClipId),
+      baseAudioGain: baseAudioGain ?? this.baseAudioGain,
+      baseAudioMuted: baseAudioMuted ?? this.baseAudioMuted,
       isReady: isReady ?? this.isReady,
       isPlaying: isPlaying ?? this.isPlaying,
       positionSeconds: positionSeconds ?? this.positionSeconds,
@@ -250,6 +258,8 @@ abstract class FusionPreviewBackend extends ChangeNotifier {
     required List<PreviewAudioNode> audioNodes,
     String? baseClipId,
     String? selectedClipId,
+    double baseAudioGain = 1,
+    bool baseAudioMuted = false,
   });
 
   Future<void> play();

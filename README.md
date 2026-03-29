@@ -31,6 +31,38 @@ The project currently includes:
   - source offset
   - source start / end bounds
 
+## Checkpoint Summary (2026-03-29)
+
+The project is currently at a strong mobile-editor checkpoint:
+
+- Flutter mobile UI is roughly `70%` ready as an editor shell
+- The timeline, tools, bottom media dock, and mobile interaction model are already built as a working prototype
+- The Rust engine foundation, FFI bridge, and native preview bridges for iOS/Android are already in place
+- The Flutter editor is now split more cleanly into `presentation`, `application`, `core`, and native layers so runtime bugs can be isolated instead of chased inside one giant screen file
+- Basic editor actions already exist at the UI/engine-state level:
+  - play / pause / seek
+  - split
+  - trim left / trim right
+  - delete
+  - duplicate
+- The next major phase is not more UI mockup work; it is stabilizing the real preview/render/audio engine path
+
+What is considered done enough for the current checkpoint:
+
+- mobile editor shell
+- mock-to-engine timeline behavior
+- real media import foundation
+- native preview foundation
+- engine folder structure and build setup
+
+What is still considered actively under construction:
+
+- stable preview playback
+- clean audio playback
+- duration normalization
+- true compositor/render path
+- export parity across iOS and Android
+
 ### Architecture Phase Status
 
 - `Phase 0`: completed
@@ -78,6 +110,8 @@ The mobile timeline supports:
 - Clip selection with highlighted state
 - Split bridge visualization
 
+At the moment, the mobile UI is in a strong prototype state and is usable enough for interaction and layout iteration, while the native-grade engine is still in active construction.
+
 ### Real Import Flow
 
 The app can now import:
@@ -109,6 +143,7 @@ For imported visual assets:
 Fusion Video is intentionally split into:
 
 - Flutter for UI and interaction
+- Flutter `application` helpers for scene mapping, metadata normalization, and runtime diagnostics
 - Rust for engine state and timeline operations
 - Native platform bridges for future preview and rendering work
 
@@ -175,12 +210,95 @@ This export layer can currently:
 
 This is not yet the final full timeline export graph.
 
+## Project Split For Debugging
+
+The current editor/runtime split is now organized as:
+
+- `lib/features/editor/presentation/`
+  - widgets, layout, gestures, and editor shell UI
+- `lib/features/editor/application/`
+  - scene projection for preview/export
+  - media metadata normalization
+  - runtime diagnostics/warnings
+- `lib/core/`
+  - engine, preview, export, and media bridge contracts
+- `engine/rust_core/`
+  - canonical timeline/project state and snapshots
+- `ios/Runner/` and `android/app/`
+  - platform probes, preview glue, and export backends
+
+The diagnostic split document for this checkpoint is:
+
+- `docs/PROJECT_SPLIT.md`
+
+## Runtime Diagnostics
+
+To make playback bugs easier to isolate, the editor now has a debug-only
+runtime diagnostics surface that shows:
+
+- engine time vs preview time
+- selected clip and active preview source
+- composition/audio node counts
+- warnings for transport mismatch
+- warnings for duration mismatch
+- warnings for possible unresolved `5s` fallback duration
+
+The goal is to make `5s clamp`, `scrub lag`, and preview desync measurable
+instead of inferred.
+
+## Known Open Issues
+
+These issues are currently considered active and unresolved:
+
+- Timeline preview audio can still sound choked / noisy in some playback paths, especially after clips are inserted into the timeline
+- Some playback flows can still behave as if there is a `5s` duration clamp due to incomplete normalization between Flutter defaults, imported media metadata, and engine timeline duration
+- Scrubbing / preview playback still needs a real performance pass to eliminate lag, black flashes, and delayed frame updates
+- Native preview behavior is not yet fully symmetric between iOS and Android
+- Android export is still not implemented; export foundation currently exists on iOS first
+- The Rust engine is connected through FFI, but real production playback/rendering is still only partially delegated to the engine
+- Audio mixing, transitions, color adjustments, and AI tools are not yet implemented in the real engine path
+- Audio metadata probing and duration propagation still need to be completed end-to-end so imported audio/video always use their real source duration
+- The current preview path is still good for architecture validation, but not yet at production-grade smoothness on device
+
+## Current Focus
+
+The current technical focus is:
+
+- stabilizing native preview playback
+- removing timeline duration mismatches
+- fixing audio quality during timeline playback
+- preparing the engine for a true render/mixer pipeline
+- keeping Flutter as UI/front-end only
+
+## Current Workspace Paths
+
+Project root on this Mac:
+
+- `/Users/mx/Documents/New project/fx_flutter_editor`
+
+Primary README:
+
+- `/Users/mx/Documents/New project/fx_flutter_editor/README.md`
+
+Engine specification:
+
+- `/Users/mx/Documents/New project/fx_flutter_editor/ENGINE_SPEC.md`
+
+Canonical engine spec source:
+
+- `/Users/mx/Documents/New project/fx_flutter_editor/docs/ENGINE_SPEC.md`
+
+Engine build notes:
+
+- `/Users/mx/Documents/New project/fx_flutter_editor/docs/ENGINE_BUILD.md`
+
 ## Repository Structure
 
 ### Flutter App
 
 - `lib/features/editor/`
   - mobile editor screen
+  - application helpers
   - preview widgets
   - tools bar
   - timeline UI
@@ -207,6 +325,8 @@ This is not yet the final full timeline export graph.
 
 ### Docs
 
+- `ENGINE_SPEC.md`
+- `docs/PROJECT_SPLIT.md`
 - `docs/ENGINE_SPEC.md`
 - `docs/ENGINE_BUILD.md`
 
@@ -279,28 +399,31 @@ The next major architectural milestone is:
   - GPU-backed composition
   - engine-owned visual output instead of single-source preview handoff
 
-## Known Open Issue
+## Current Blocking Runtime Issues
 
-The current top blocking issue is still unresolved on iOS preview playback.
+The current top blocking issues are now concentrated in the runtime preview path rather than the editor shell itself.
 
-Current symptoms:
+Current symptoms under active investigation:
 
-- imported video can still stop around the `5s` mark even when the source is much longer
-- playback can stutter and feel unsmooth
-- audio can sound doubled, noisy, echo-like, or otherwise unclear
+- imported video can still stop around the `5s` mark even when the source is longer
+- playback can stutter and feel unsmooth during transport updates
+- audio can sound noisy, choked, or otherwise unclear in some timeline playback paths
+- scrub / seek can still cause black flashes or delayed visual response in some cases
 
 Important clarification:
 
 - media import itself is real
-- timeline insertion is real
-- the unresolved bug is in the current transport / native preview / audio synchronization path
+- timeline insertion itself is real
+- the current unresolved problems are in the transport / native preview / audio synchronization layers
 
-This issue is now documented explicitly because the repository is being used as a checkpoint before a deeper multi-agent code review on:
+This checkpoint is intentionally documented before deeper engine/runtime work on:
 
 - engine clock ownership
+- duration recomputation rules
+- audio duplication / gain path correctness
 - iOS native preview sync
-- audio duplication / secondary player rules
-- simulator/runtime integration between Flutter, Rust, and native preview
+- Android native preview parity
+- simulator/device transport behavior
 
 ## Design Direction
 

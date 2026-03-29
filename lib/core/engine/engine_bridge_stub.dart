@@ -97,6 +97,7 @@ class FusionVideoEngineStub implements FusionVideoEngineBridge {
     }
 
     _timelineProjects[handle.id] = current;
+    _syncRuntimeDuration(handle.id);
   }
 
   @override
@@ -489,6 +490,8 @@ class FusionVideoEngineStub implements FusionVideoEngineBridge {
             sourceEndSeconds: sourceStartSeconds + clip.durationSeconds,
             sourcePositionSeconds: sourcePositionSeconds,
             gain: clip.audioGain,
+            fadeDurationSeconds: 0.005,
+            gainEnvelope: 1,
             isMuted: clip.isMuted,
           ),
         );
@@ -545,6 +548,25 @@ class FusionVideoEngineStub implements FusionVideoEngineBridge {
     );
     current[trackIndex] = nextTrack;
     _timelineProjects[handleId] = current;
+    _syncRuntimeDuration(handleId);
+  }
+
+  void _syncRuntimeDuration(int handleId) {
+    final runtime = _projects[handleId];
+    final tracks = _timelineProjects[handleId];
+    if (runtime == null || tracks == null) {
+      return;
+    }
+
+    final timelineDuration = tracks.fold<double>(0, (maxDuration, track) {
+      final trackDuration = track.clips.fold<double>(
+        0,
+        (sum, clip) => sum + clip.durationSeconds,
+      );
+      return trackDuration > maxDuration ? trackDuration : maxDuration;
+    });
+
+    runtime.updateDuration(timelineDuration);
   }
 
   EngineVisualTransformSnapshot _defaultTransformFor(EngineTrackKind kind) {

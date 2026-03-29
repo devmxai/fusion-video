@@ -174,6 +174,8 @@ class EngineAudioNodeSnapshot {
     required this.sourceEndSeconds,
     required this.sourcePositionSeconds,
     required this.gain,
+    required this.fadeDurationSeconds,
+    required this.gainEnvelope,
     required this.isMuted,
   });
 
@@ -189,6 +191,8 @@ class EngineAudioNodeSnapshot {
   final double sourceEndSeconds;
   final double sourcePositionSeconds;
   final double gain;
+  final double fadeDurationSeconds;
+  final double gainEnvelope;
   final bool isMuted;
 }
 

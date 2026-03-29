@@ -5,6 +5,7 @@ import 'engine_contract.dart';
 class SimulatedProjectRuntime {
   SimulatedProjectRuntime(this.config)
       : _controller = StreamController<EngineStatusSnapshot>.broadcast() {
+    _durationSeconds = config.durationSeconds;
     _emit();
   }
 
@@ -13,12 +14,33 @@ class SimulatedProjectRuntime {
   Timer? _timer;
   DateTime? _lastTickAt;
   double _seconds = 0;
+  late double _durationSeconds;
   EnginePlaybackState _playbackState = EnginePlaybackState.stopped;
 
   Stream<EngineStatusSnapshot> get stream => _controller.stream;
 
+  void updateDuration(double seconds) {
+    final nextDuration = seconds < 0 ? 0.0 : seconds;
+    _durationSeconds = nextDuration;
+    if (_seconds > _durationSeconds) {
+      _seconds = _durationSeconds;
+    }
+    if (_durationSeconds <= 0 &&
+        _playbackState == EnginePlaybackState.playing) {
+      pause();
+      return;
+    }
+    _emit();
+  }
+
   void play() {
     if (_playbackState == EnginePlaybackState.playing) {
+      return;
+    }
+    if (_durationSeconds <= 0) {
+      _seconds = 0;
+      _playbackState = EnginePlaybackState.stopped;
+      _emit();
       return;
     }
     _playbackState = EnginePlaybackState.playing;
@@ -39,7 +61,7 @@ class SimulatedProjectRuntime {
   }
 
   void seek(double seconds) {
-    _seconds = seconds.clamp(0.0, config.durationSeconds);
+    _seconds = seconds.clamp(0.0, _durationSeconds);
     if (_playbackState == EnginePlaybackState.playing) {
       _lastTickAt = DateTime.now();
     } else {
@@ -65,9 +87,9 @@ class SimulatedProjectRuntime {
       return;
     }
 
-    _seconds = (_seconds + deltaSeconds).clamp(0.0, config.durationSeconds);
-    if (_seconds >= config.durationSeconds) {
-      _seconds = config.durationSeconds;
+    _seconds = (_seconds + deltaSeconds).clamp(0.0, _durationSeconds);
+    if (_seconds >= _durationSeconds) {
+      _seconds = _durationSeconds;
       _playbackState = EnginePlaybackState.paused;
       _timer?.cancel();
       _timer = null;

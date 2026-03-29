@@ -145,6 +145,8 @@ import AVFoundation
           projectHeight: args["projectHeight"] as? Int,
           baseClipId: args["baseClipId"] as? String,
           selectedClipId: args["selectedClipId"] as? String,
+          baseAudioGain: args["baseAudioGain"] as? Double,
+          baseAudioMuted: args["baseAudioMuted"] as? Bool,
           sceneNodes: args["sceneNodes"] as? [[String: Any]] ?? [],
           audioNodes: args["audioNodes"] as? [[String: Any]] ?? [],
           positionSeconds: positionSeconds,
@@ -182,6 +184,13 @@ private enum FusionMediaProbe {
       return [
         "width": Int(image.size.width * image.scale),
         "height": Int(image.size.height * image.scale)
+      ]
+    case "audio":
+      let url = URL(fileURLWithPath: path)
+      let asset = AVURLAsset(url: url)
+      let duration = asset.duration.seconds
+      return [
+        "durationSeconds": duration.isFinite ? duration : 0
       ]
     default:
       return nil
@@ -911,6 +920,8 @@ private final class FusionPreviewRegistry {
         projectHeight: payload.projectHeight,
         baseClipId: payload.baseClipId,
         selectedClipId: payload.selectedClipId,
+        baseAudioGain: payload.baseAudioGain,
+        baseAudioMuted: payload.baseAudioMuted,
         sceneNodes: payload.sceneNodes,
         audioNodes: payload.audioNodes,
         positionSeconds: payload.positionSeconds,
@@ -935,6 +946,8 @@ private final class FusionPreviewRegistry {
     projectHeight: Int?,
     baseClipId: String?,
     selectedClipId: String?,
+    baseAudioGain: Double?,
+    baseAudioMuted: Bool?,
     sceneNodes: [[String: Any]],
     audioNodes: [[String: Any]],
     positionSeconds: Double,
@@ -951,6 +964,8 @@ private final class FusionPreviewRegistry {
       projectHeight: projectHeight,
       baseClipId: baseClipId,
       selectedClipId: selectedClipId,
+      baseAudioGain: baseAudioGain,
+      baseAudioMuted: baseAudioMuted,
       sceneNodes: sceneNodes,
       audioNodes: audioNodes,
       positionSeconds: positionSeconds,
@@ -968,6 +983,8 @@ private final class FusionPreviewRegistry {
         projectHeight: projectHeight,
         baseClipId: baseClipId,
         selectedClipId: selectedClipId,
+        baseAudioGain: baseAudioGain,
+        baseAudioMuted: baseAudioMuted,
         sceneNodes: sceneNodes,
         audioNodes: audioNodes,
         positionSeconds: positionSeconds,
@@ -988,6 +1005,8 @@ private struct FusionPreviewPayload {
   let projectHeight: Int?
   let baseClipId: String?
   let selectedClipId: String?
+  let baseAudioGain: Double?
+  let baseAudioMuted: Bool?
   let sceneNodes: [[String: Any]]
   let audioNodes: [[String: Any]]
   let positionSeconds: Double
@@ -1039,6 +1058,8 @@ private final class FusionPreviewNativeView: UIView {
   private var currentProjectHeight: CGFloat = 0
   private var currentBaseClipId: String?
   private var currentSelectedClipId: String?
+  private var currentBaseAudioGain: Float = 1.0
+  private var currentBaseAudioMuted = false
   private var currentSceneNodes: [[String: Any]] = []
   private var currentAudioNodes: [[String: Any]] = []
   private var overlayVideoViews: [String: FusionOverlayVideoNodeView] = [:]
@@ -1065,6 +1086,8 @@ private final class FusionPreviewNativeView: UIView {
       projectHeight: nil,
       baseClipId: nil,
       selectedClipId: nil,
+      baseAudioGain: nil,
+      baseAudioMuted: nil,
       sceneNodes: [],
       audioNodes: [],
       positionSeconds: 0,
@@ -1114,6 +1137,8 @@ private final class FusionPreviewNativeView: UIView {
     projectHeight: Int?,
     baseClipId: String?,
     selectedClipId: String?,
+    baseAudioGain: Double?,
+    baseAudioMuted: Bool?,
     sceneNodes: [[String: Any]],
     audioNodes: [[String: Any]],
     positionSeconds: Double,
@@ -1130,6 +1155,8 @@ private final class FusionPreviewNativeView: UIView {
     currentProjectHeight = CGFloat(projectHeight ?? 0)
     currentBaseClipId = baseClipId
     currentSelectedClipId = selectedClipId
+    currentBaseAudioGain = Float(baseAudioGain ?? 1.0)
+    currentBaseAudioMuted = baseAudioMuted ?? false
     currentSceneNodes = sceneNodes
     currentAudioNodes = audioNodes
     currentPosition = positionSeconds
@@ -1155,10 +1182,10 @@ private final class FusionPreviewNativeView: UIView {
   private var currentPosition: Double = 0
   private var isCurrentlyPlaying = false
 
-  private func applyBaseAudioSettings(from node: [String: Any]?) {
+  private func applyBaseAudioSettings() {
     guard let player else { return }
-    player.volume = (node?["gain"] as? NSNumber)?.floatValue ?? 1.0
-    player.isMuted = (node?["isMuted"] as? Bool) ?? false
+    player.volume = currentBaseAudioMuted ? 0.0 : currentBaseAudioGain
+    player.isMuted = currentBaseAudioMuted
   }
 
   private func setupUI() {
@@ -1202,6 +1229,8 @@ private final class FusionPreviewNativeView: UIView {
       let url = URL(fileURLWithPath: sourcePath)
       let newPlayer = AVPlayer(url: url)
       newPlayer.actionAtItemEnd = .pause
+      newPlayer.automaticallyWaitsToMinimizeStalling = false
+      newPlayer.currentItem?.preferredForwardBufferDuration = 0
       newPlayer.volume = 1.0
       newPlayer.isMuted = false
       removePlaybackObserver()
@@ -1234,7 +1263,12 @@ private final class FusionPreviewNativeView: UIView {
     let targetSeconds = clampedPositionSeconds(currentPosition)
     let target = CMTime(seconds: targetSeconds, preferredTimescale: 600)
     let current = player.currentTime().seconds
-    let shouldSeek = !current.isFinite || abs(current - targetSeconds) > 0.04
+    let seekThreshold = isCurrentlyPlaying ? 0.18 : 0.04
+    let shouldSeek = !current.isFinite || abs(current - targetSeconds) > seekThreshold
+    let seekTolerance = CMTime(
+      seconds: isCurrentlyPlaying ? (1.0 / 60.0) : 0.0,
+      preferredTimescale: 600
+    )
 
     let playOrPause = { [weak self] in
       guard let self else { return }
@@ -1254,7 +1288,11 @@ private final class FusionPreviewNativeView: UIView {
     }
 
     if shouldSeek {
-      player.seek(to: target, toleranceBefore: .zero, toleranceAfter: .zero) { _ in
+      player.seek(
+        to: target,
+        toleranceBefore: seekTolerance,
+        toleranceAfter: seekTolerance
+      ) { _ in
         playOrPause()
         self.applyOverlayTransport(referenceProjectSeconds: self.currentProjectPlaybackSeconds())
       }
@@ -1410,18 +1448,11 @@ private final class FusionPreviewNativeView: UIView {
     var reusableAudioPlayers = overlayAudioPlayers
     overlayAudioPlayers = [:]
     overlayAudioNodeSnapshots = [:]
-    let baseAudioNode = currentAudioNodes.first {
-      ($0["clipId"] as? String) == currentBaseClipId
-    } ?? currentAudioNodes.first {
-      ($0["kind"] as? String) == "video" &&
-      (($0["localPath"] as? String) == currentSourcePath)
-    }
-    applyBaseAudioSettings(from: baseAudioNode)
-    let baseAudioClipId = baseAudioNode?["clipId"] as? String
+    applyBaseAudioSettings()
 
     for node in currentAudioNodes {
       guard let clipId = node["clipId"] as? String else { continue }
-      if clipId == currentBaseClipId || clipId == baseAudioClipId { continue }
+      if clipId == currentBaseClipId { continue }
       guard let localPath = node["localPath"] as? String else { continue }
       if currentSourceKind == "video", localPath == currentSourcePath {
         continue
@@ -1639,6 +1670,9 @@ private final class FusionOverlayVideoNodeView: UIView {
     currentSourcePath = sourcePath
     let newPlayer = AVPlayer(url: URL(fileURLWithPath: sourcePath))
     newPlayer.actionAtItemEnd = .pause
+    newPlayer.automaticallyWaitsToMinimizeStalling = false
+    newPlayer.currentItem?.preferredForwardBufferDuration = 0
+    newPlayer.isMuted = true
     removePlaybackObserver()
     player?.pause()
     player = newPlayer
@@ -1650,7 +1684,12 @@ private final class FusionOverlayVideoNodeView: UIView {
     guard let player else { return }
     let targetSeconds = clampedPositionSeconds(positionSeconds)
     let current = player.currentTime().seconds
-    let shouldSeek = !current.isFinite || abs(current - targetSeconds) > 0.05
+    let seekThreshold = isPlaying ? 0.18 : 0.05
+    let shouldSeek = !current.isFinite || abs(current - targetSeconds) > seekThreshold
+    let seekTolerance = CMTime(
+      seconds: isPlaying ? (1.0 / 60.0) : 0.0,
+      preferredTimescale: 600
+    )
 
     let playOrPause = { [weak self] in
       guard let self else { return }
@@ -1672,8 +1711,8 @@ private final class FusionOverlayVideoNodeView: UIView {
     if shouldSeek {
       player.seek(
         to: CMTime(seconds: targetSeconds, preferredTimescale: 600),
-        toleranceBefore: .zero,
-        toleranceAfter: .zero
+        toleranceBefore: seekTolerance,
+        toleranceAfter: seekTolerance
       ) { _ in
         playOrPause()
       }
@@ -1752,6 +1791,8 @@ private final class FusionOverlayAudioNodePlayer {
     currentSourcePath = sourcePath
     let newPlayer = AVPlayer(url: URL(fileURLWithPath: sourcePath))
     newPlayer.actionAtItemEnd = .pause
+    newPlayer.automaticallyWaitsToMinimizeStalling = false
+    newPlayer.currentItem?.preferredForwardBufferDuration = 0
     newPlayer.volume = gain
     newPlayer.isMuted = isMuted
     removePlaybackObserver()
@@ -1764,7 +1805,12 @@ private final class FusionOverlayAudioNodePlayer {
     guard let player else { return }
     let targetSeconds = clampedPositionSeconds(positionSeconds)
     let current = player.currentTime().seconds
-    let shouldSeek = !current.isFinite || abs(current - targetSeconds) > 0.05
+    let seekThreshold = isPlaying ? 0.18 : 0.05
+    let shouldSeek = !current.isFinite || abs(current - targetSeconds) > seekThreshold
+    let seekTolerance = CMTime(
+      seconds: isPlaying ? (1.0 / 60.0) : 0.0,
+      preferredTimescale: 600
+    )
 
     let playOrPause = { [weak self] in
       guard let self else { return }
@@ -1786,8 +1832,8 @@ private final class FusionOverlayAudioNodePlayer {
     if shouldSeek {
       player.seek(
         to: CMTime(seconds: targetSeconds, preferredTimescale: 600),
-        toleranceBefore: .zero,
-        toleranceAfter: .zero
+        toleranceBefore: seekTolerance,
+        toleranceAfter: seekTolerance
       ) { _ in
         playOrPause()
       }

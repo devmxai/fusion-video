@@ -552,6 +552,11 @@ class FusionVideoEngineSessionController extends ChangeNotifier {
       ),
     );
     _tracks = await _loadTracksFromEngine(handle);
+    if (!_containsClipId(clipId)) {
+      throw StateError(
+        'Engine rejected clip $clipId. Verify asset metadata and duration normalization.',
+      );
+    }
     _selectedClipId = clipId;
     notifyListeners();
   }

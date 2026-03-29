@@ -81,8 +81,12 @@ pub struct AudioNodeState {
     pub source_end_seconds: f64,
     pub source_position_seconds: f64,
     pub gain: f64,
+    pub fade_duration_seconds: f64,
+    pub gain_envelope: f64,
     pub is_muted: bool,
 }
+
+const AUDIO_FADE_DURATION_SECONDS: f64 = 0.005;
 
 impl ClipState {
     pub fn media(id: &str, asset_id: &str, duration_seconds: f64) -> Self {
@@ -469,6 +473,15 @@ impl ProjectState {
                 let source_start_seconds = clip.source_offset_seconds;
                 let source_position_seconds = source_start_seconds
                     + (seconds - start_seconds).clamp(0.0, clip.duration_seconds);
+                let fade_duration_seconds = AUDIO_FADE_DURATION_SECONDS
+                    .min((end_seconds - start_seconds) / 2.0)
+                    .max(0.0);
+                let gain_envelope = audio_envelope_at(
+                    seconds,
+                    start_seconds,
+                    end_seconds,
+                    fade_duration_seconds,
+                );
 
                 nodes.push(AudioNodeState {
                     clip_id: clip.id.clone(),
@@ -483,6 +496,8 @@ impl ProjectState {
                     source_end_seconds: source_start_seconds + clip.duration_seconds,
                     source_position_seconds,
                     gain: clip.audio_gain,
+                    fade_duration_seconds,
+                    gain_envelope,
                     is_muted: clip.is_muted,
                 });
             }
@@ -525,6 +540,23 @@ impl ProjectState {
         }
         None
     }
+}
+
+fn audio_envelope_at(
+    seconds: f64,
+    clip_start_seconds: f64,
+    clip_end_seconds: f64,
+    fade_duration_seconds: f64,
+) -> f64 {
+    if fade_duration_seconds <= 0.0 || clip_end_seconds <= clip_start_seconds {
+        return 1.0;
+    }
+
+    let distance_from_start = (seconds - clip_start_seconds).max(0.0);
+    let distance_to_end = (clip_end_seconds - seconds).max(0.0);
+    let fade_in = (distance_from_start / fade_duration_seconds).clamp(0.0, 1.0);
+    let fade_out = (distance_to_end / fade_duration_seconds).clamp(0.0, 1.0);
+    fade_in.min(fade_out)
 }
 
 impl Default for ProjectState {

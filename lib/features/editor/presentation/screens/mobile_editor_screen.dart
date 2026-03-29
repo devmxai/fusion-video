@@ -1,21 +1,25 @@
 import 'dart:async';
 
 import 'package:file_picker/file_picker.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 
+import '../../application/editor_media_support.dart';
+import '../../application/editor_runtime_diagnostics.dart';
+import '../../application/editor_scene_mapper.dart';
 import '../../../../core/engine/engine_contract.dart';
 import '../../../../core/engine/engine_session_controller.dart';
 import '../../../../core/export/export_backend.dart';
 import '../../../../core/export/export_session_controller.dart';
 import '../../../../core/export/native_export_backend.dart';
-import '../../../../core/media/local_media_probe.dart';
 import '../../../../core/preview/native_preview_backend.dart';
 import '../../../../core/preview/preview_backend.dart';
 import '../../../../core/theme/app_theme.dart';
 import '../models/editor_media_tab.dart';
 import '../models/mock_asset_item.dart';
 import '../models/timeline_mock_models.dart';
+import '../widgets/editor_diagnostics_panel.dart';
 import '../widgets/editor_tools_bar.dart';
 import '../widgets/editor_top_bar.dart';
 import '../widgets/media_bottom_sheet.dart';
@@ -31,7 +35,7 @@ class MobileEditorScreen extends StatefulWidget {
 }
 
 class _MobileEditorScreenState extends State<MobileEditorScreen> {
-  static const double _timelineDuration = 5;
+  static const double _initialProjectDuration = 0;
   final ImagePicker _imagePicker = ImagePicker();
 
   EditorMediaTab activeTab = EditorMediaTab.video;
@@ -58,7 +62,7 @@ class _MobileEditorScreenState extends State<MobileEditorScreen> {
         height: 1920,
         fps: 30,
         sampleRate: 48000,
-        durationSeconds: _timelineDuration,
+        durationSeconds: _initialProjectDuration,
       ),
     );
     _assetLibrary = ValueNotifier<List<MockAssetItem>>(
@@ -109,41 +113,15 @@ class _MobileEditorScreenState extends State<MobileEditorScreen> {
     );
   }
 
-  EngineCompositionNodeSnapshot? _resolveBasePreviewNode(
-    List<EngineCompositionNodeSnapshot> nodes, {
-    String? selectedClipId,
-  }) {
-    if (nodes.isEmpty) {
-      return null;
-    }
-
-    if (selectedClipId != null && !_engineController.isPlaying) {
-      for (final node in nodes.reversed) {
-        if (node.clipId == selectedClipId &&
-            (node.trackKind == EngineTrackKind.video ||
-                node.trackKind == EngineTrackKind.image)) {
-          return node;
-        }
-      }
-    }
-
-    for (final node in nodes) {
-      if (node.trackKind == EngineTrackKind.video ||
-          node.trackKind == EngineTrackKind.image) {
-        return node;
-      }
-    }
-    return null;
-  }
-
   Future<EngineCompositionNodeSnapshot?> _currentPreviewNode({
     double? projectSeconds,
   }) async {
     final seconds = projectSeconds ?? _engineController.currentSeconds;
     final nodes = await _engineController.compositionAt(seconds);
     _compositionNodes = nodes;
-    return _resolveBasePreviewNode(
+    return EditorSceneMapper.resolveBasePreviewNode(
       nodes,
+      isPlaying: _engineController.isPlaying,
       selectedClipId: _engineController.selectedClipId,
     );
   }
@@ -153,13 +131,29 @@ class _MobileEditorScreenState extends State<MobileEditorScreen> {
     _audioNodes = await _engineController.audioNodesAt(
       _engineController.currentSeconds,
     );
+    EngineAudioNodeSnapshot? baseAudioNode;
+    final targetClipId = targetNode?.clipId;
+    if (targetClipId != null) {
+      for (final node in _audioNodes) {
+        if (node.clipId == targetClipId &&
+            node.trackKind == EngineTrackKind.video) {
+          baseAudioNode = node;
+          break;
+        }
+      }
+    }
     await _previewBackend.updateCompositionScene(
       projectWidth: _engineController.projectWidth,
       projectHeight: _engineController.projectHeight,
-      nodes: _previewCompositionNodesFromScene(_compositionNodes),
-      audioNodes: _previewAudioNodesFromScene(_audioNodes),
+      nodes: EditorSceneMapper.previewCompositionNodes(
+        _compositionNodes,
+        assetLabelResolver: (assetId) => _findAssetById(assetId)?.label,
+      ),
+      audioNodes: EditorSceneMapper.previewAudioNodes(_audioNodes),
       baseClipId: targetNode?.clipId,
       selectedClipId: _engineController.selectedClipId,
+      baseAudioGain: baseAudioNode?.gain ?? 1,
+      baseAudioMuted: baseAudioNode?.isMuted ?? false,
     );
 
     final currentSource = _previewBackend.state.source;
@@ -185,8 +179,10 @@ class _MobileEditorScreenState extends State<MobileEditorScreen> {
     }
 
     final targetSource = _previewSourceForNode(targetNode);
-    final didAttachSource =
-        _shouldAttachPreviewSource(currentSource, targetSource);
+    final didAttachSource = EditorSceneMapper.shouldAttachPreviewSource(
+      currentSource,
+      targetSource,
+    );
     if (didAttachSource) {
       await _activatePreviewForAsset(
         targetAsset,
@@ -320,9 +316,10 @@ class _MobileEditorScreenState extends State<MobileEditorScreen> {
         _audioNodes.where((node) => node.clipId == source.id);
     final audioNode =
         matchingAudioNode.isNotEmpty ? matchingAudioNode.first : null;
-    final exportSceneNodes =
-        _exportSceneNodesFromCompositionNodes(_compositionNodes);
-    final exportAudioNodes = _exportAudioNodesFromAudioNodes(_audioNodes);
+    final exportSceneNodes = EditorSceneMapper.exportSceneNodes(
+      _compositionNodes,
+    );
+    final exportAudioNodes = EditorSceneMapper.exportAudioNodes(_audioNodes);
 
     await _exportController.startExport(
       FusionExportRequest(
@@ -572,7 +569,9 @@ class _MobileEditorScreenState extends State<MobileEditorScreen> {
             asset.width == null ||
             asset.height == null)) {
       try {
-        final metadata = await _readVideoMetadataWithRetry(asset.localPath!);
+        final metadata = await EditorMediaSupport.readVideoMetadataWithRetry(
+          asset.localPath!,
+        );
         final updatedAsset = asset.copyWith(
           durationSeconds: metadata.durationSeconds,
           width: metadata.width,
@@ -587,10 +586,28 @@ class _MobileEditorScreenState extends State<MobileEditorScreen> {
       }
     }
 
+    if (asset.tab == EditorMediaTab.audio && asset.durationSeconds == null) {
+      try {
+        final metadata =
+            await EditorMediaSupport.readAudioMetadata(asset.localPath!);
+        final updatedAsset = asset.copyWith(
+          durationSeconds: metadata.durationSeconds,
+        );
+        _replaceAsset(updatedAsset);
+        return updatedAsset;
+      } catch (error, stackTrace) {
+        debugPrint('Fusion Video: audio metadata probe failed: $error');
+        debugPrintStack(stackTrace: stackTrace);
+        return asset;
+      }
+    }
+
     if (asset.tab == EditorMediaTab.image &&
         (asset.width == null || asset.height == null)) {
       try {
-        final metadata = await _readImageMetadata(asset.localPath!);
+        final metadata = await EditorMediaSupport.readImageMetadata(
+          asset.localPath!,
+        );
         final updatedAsset = asset.copyWith(
           width: metadata.width,
           height: metadata.height,
@@ -665,187 +682,10 @@ class _MobileEditorScreenState extends State<MobileEditorScreen> {
 
   PreviewSource _previewSourceForNode(EngineCompositionNodeSnapshot node) {
     final descriptor = _engineController.assetForId(node.assetId);
-    return PreviewSource(
-      id: node.clipId,
-      assetId: node.assetId,
-      kind: node.trackKind == EngineTrackKind.video
-          ? PreviewSourceKind.video
-          : PreviewSourceKind.image,
-      localPath: node.assetUri,
-      clipStartSeconds: node.clipStartSeconds,
-      clipEndSeconds: node.clipEndSeconds,
-      durationSeconds: descriptor?.durationSeconds,
-      width: descriptor?.width,
-      height: descriptor?.height,
-      sourceStartSeconds: node.sourceStartSeconds,
-      sourceEndSeconds: node.sourceEndSeconds,
-      clipDurationSeconds: node.clipDurationSeconds,
+    return EditorSceneMapper.previewSourceForNode(
+      node,
+      descriptor: descriptor,
     );
-  }
-
-  List<PreviewCompositionNode> _previewCompositionNodesFromScene(
-    List<EngineCompositionNodeSnapshot> nodes,
-  ) {
-    final previewNodes = <PreviewCompositionNode>[];
-    for (final node in nodes) {
-      if (node.trackKind == EngineTrackKind.audio ||
-          node.trackKind == EngineTrackKind.effect) {
-        continue;
-      }
-      previewNodes.add(
-        PreviewCompositionNode(
-          clipId: node.clipId,
-          assetId: node.assetId,
-          kind: switch (node.trackKind) {
-            EngineTrackKind.video => 'video',
-            EngineTrackKind.image => 'image',
-            EngineTrackKind.text => 'text',
-            EngineTrackKind.lipSync => 'lipSync',
-            EngineTrackKind.audio => 'audio',
-            EngineTrackKind.effect => 'effect',
-          },
-          localPath: node.assetUri,
-          displayLabel: node.displayLabel ??
-              _findAssetById(node.assetId)?.label ??
-              switch (node.trackKind) {
-                EngineTrackKind.video => 'Video',
-                EngineTrackKind.image => 'Image',
-                EngineTrackKind.audio => 'Audio',
-                EngineTrackKind.text => 'Text',
-                EngineTrackKind.lipSync => 'Lip Sync',
-                EngineTrackKind.effect => 'Effect',
-              },
-          clipStartSeconds: node.clipStartSeconds,
-          clipEndSeconds: node.clipEndSeconds,
-          sourcePositionSeconds: node.sourcePositionSeconds,
-          sourceStartSeconds: node.sourceStartSeconds,
-          sourceEndSeconds: node.sourceEndSeconds,
-          x: node.transform.x,
-          y: node.transform.y,
-          width: node.transform.width,
-          height: node.transform.height,
-          opacity: node.transform.opacity,
-          rotationDegrees: node.transform.rotationDegrees,
-          zIndex: node.transform.zIndex,
-        ),
-      );
-    }
-    previewNodes.sort((a, b) => a.zIndex.compareTo(b.zIndex));
-    return previewNodes;
-  }
-
-  List<PreviewAudioNode> _previewAudioNodesFromScene(
-    List<EngineAudioNodeSnapshot> nodes,
-  ) {
-    return nodes
-        .map(
-          (node) => PreviewAudioNode(
-            clipId: node.clipId,
-            assetId: node.assetId,
-            kind: switch (node.trackKind) {
-              EngineTrackKind.video => 'video',
-              EngineTrackKind.audio => 'audio',
-              EngineTrackKind.image => 'image',
-              EngineTrackKind.text => 'text',
-              EngineTrackKind.lipSync => 'lipSync',
-              EngineTrackKind.effect => 'effect',
-            },
-            localPath: node.assetUri,
-            displayLabel: node.displayLabel,
-            clipStartSeconds: node.clipStartSeconds,
-            clipEndSeconds: node.clipEndSeconds,
-            sourcePositionSeconds: node.sourcePositionSeconds,
-            sourceStartSeconds: node.sourceStartSeconds,
-            sourceEndSeconds: node.sourceEndSeconds,
-            gain: node.gain,
-            isMuted: node.isMuted,
-          ),
-        )
-        .toList(growable: false);
-  }
-
-  List<FusionExportSceneNode> _exportSceneNodesFromCompositionNodes(
-    List<EngineCompositionNodeSnapshot> nodes,
-  ) {
-    return nodes
-        .map(
-          (node) => FusionExportSceneNode(
-            clipId: node.clipId,
-            assetId: node.assetId,
-            kind: switch (node.trackKind) {
-              EngineTrackKind.video => 'video',
-              EngineTrackKind.image => 'image',
-              EngineTrackKind.audio => 'audio',
-              EngineTrackKind.text => 'text',
-              EngineTrackKind.lipSync => 'lipSync',
-              EngineTrackKind.effect => 'effect',
-            },
-            localPath: node.assetUri,
-            displayLabel: node.displayLabel,
-            clipStartSeconds: node.clipStartSeconds,
-            clipEndSeconds: node.clipEndSeconds,
-            sourceStartSeconds: node.sourceStartSeconds,
-            sourceEndSeconds: node.sourceEndSeconds,
-            x: node.transform.x,
-            y: node.transform.y,
-            width: node.transform.width,
-            height: node.transform.height,
-            opacity: node.transform.opacity,
-            rotationDegrees: node.transform.rotationDegrees,
-            zIndex: node.transform.zIndex,
-          ),
-        )
-        .toList(growable: false);
-  }
-
-  List<FusionExportAudioNode> _exportAudioNodesFromAudioNodes(
-    List<EngineAudioNodeSnapshot> nodes,
-  ) {
-    return nodes
-        .map(
-          (node) => FusionExportAudioNode(
-            clipId: node.clipId,
-            assetId: node.assetId,
-            kind: switch (node.trackKind) {
-              EngineTrackKind.video => 'video',
-              EngineTrackKind.image => 'image',
-              EngineTrackKind.audio => 'audio',
-              EngineTrackKind.text => 'text',
-              EngineTrackKind.lipSync => 'lipSync',
-              EngineTrackKind.effect => 'effect',
-            },
-            localPath: node.assetUri,
-            displayLabel: node.displayLabel,
-            clipStartSeconds: node.clipStartSeconds,
-            clipEndSeconds: node.clipEndSeconds,
-            sourceStartSeconds: node.sourceStartSeconds,
-            sourceEndSeconds: node.sourceEndSeconds,
-            gain: node.gain,
-            isMuted: node.isMuted,
-          ),
-        )
-        .toList(growable: false);
-  }
-
-  bool _shouldAttachPreviewSource(
-    PreviewSource? current,
-    PreviewSource target,
-  ) {
-    if (current == null) {
-      return true;
-    }
-
-    return current.id != target.id ||
-        current.localPath != target.localPath ||
-        current.kind != target.kind ||
-        (current.sourceStartSeconds - target.sourceStartSeconds).abs() >
-            0.001 ||
-        ((current.sourceEndSeconds ?? 0) - (target.sourceEndSeconds ?? 0))
-                .abs() >
-            0.001 ||
-        ((current.clipDurationSeconds ?? 0) - (target.clipDurationSeconds ?? 0))
-                .abs() >
-            0.001;
   }
 
   Future<void> _openMediaSheet(EditorMediaTab tab) async {
@@ -912,7 +752,7 @@ class _MobileEditorScreenState extends State<MobileEditorScreen> {
           EngineAssetDescriptor(
             id: newAsset.id,
             uri: newAsset.localPath ?? '',
-            kind: _engineTrackKindFor(newAsset.tab),
+            kind: EditorMediaSupport.engineTrackKindFor(newAsset.tab),
             label: newAsset.label,
             durationSeconds: newAsset.durationSeconds,
             width: newAsset.width,
@@ -945,7 +785,7 @@ class _MobileEditorScreenState extends State<MobileEditorScreen> {
     }
   }
 
-  Future<_ImportedAssetFile?> _pickAssetForTab(EditorMediaTab tab) async {
+  Future<EditorImportedAssetFile?> _pickAssetForTab(EditorMediaTab tab) async {
     switch (tab) {
       case EditorMediaTab.video:
         final file = await _imagePicker.pickVideo(
@@ -954,8 +794,9 @@ class _MobileEditorScreenState extends State<MobileEditorScreen> {
         if (file == null) {
           return null;
         }
-        final metadata = await _readVideoMetadataWithRetry(file.path);
-        return _ImportedAssetFile(
+        final metadata =
+            await EditorMediaSupport.readVideoMetadataWithRetry(file.path);
+        return EditorImportedAssetFile(
           path: file.path,
           name: file.name,
           durationSeconds: metadata.durationSeconds,
@@ -970,8 +811,8 @@ class _MobileEditorScreenState extends State<MobileEditorScreen> {
         if (file == null) {
           return null;
         }
-        final metadata = await _readImageMetadata(file.path);
-        return _ImportedAssetFile(
+        final metadata = await EditorMediaSupport.readImageMetadata(file.path);
+        return EditorImportedAssetFile(
           path: file.path,
           name: file.name,
           width: metadata.width,
@@ -981,7 +822,7 @@ class _MobileEditorScreenState extends State<MobileEditorScreen> {
         final result = await FilePicker.platform.pickFiles(
           allowMultiple: false,
           type: FileType.custom,
-          allowedExtensions: _allowedExtensionsFor(tab),
+          allowedExtensions: EditorMediaSupport.allowedExtensionsFor(tab),
         );
         if (result == null || result.files.isEmpty) {
           return null;
@@ -990,9 +831,11 @@ class _MobileEditorScreenState extends State<MobileEditorScreen> {
         if (file.path == null) {
           return null;
         }
-        return _ImportedAssetFile(
+        final metadata = await EditorMediaSupport.readAudioMetadata(file.path!);
+        return EditorImportedAssetFile(
           path: file.path!,
           name: file.name,
+          durationSeconds: metadata.durationSeconds,
         );
       case EditorMediaTab.text:
       case EditorMediaTab.lipSync:
@@ -1020,7 +863,7 @@ class _MobileEditorScreenState extends State<MobileEditorScreen> {
         EngineAssetDescriptor(
           id: preparedAsset.id,
           uri: preparedAsset.localPath ?? '',
-          kind: _engineTrackKindFor(preparedAsset.tab),
+          kind: EditorMediaSupport.engineTrackKindFor(preparedAsset.tab),
           label: preparedAsset.label,
           durationSeconds: preparedAsset.durationSeconds,
           width: preparedAsset.width,
@@ -1028,8 +871,15 @@ class _MobileEditorScreenState extends State<MobileEditorScreen> {
         ),
       );
       final durationSeconds = preparedAsset.durationSeconds ??
-          _defaultDurationFor(preparedAsset.tab);
-      final trackKind = _engineTrackKindFor(preparedAsset.tab);
+          EditorMediaSupport.defaultDurationFor(preparedAsset.tab);
+      final trackKind = EditorMediaSupport.engineTrackKindFor(
+        preparedAsset.tab,
+      );
+      if (preparedAsset.tab == EditorMediaTab.audio && durationSeconds <= 0) {
+        throw StateError(
+          'Unable to read audio duration before adding it to the timeline.',
+        );
+      }
       final hadVisualTracks = _engineController.tracks.any(
         (track) =>
             (track.kind == TimelineTrackKind.video ||
@@ -1082,89 +932,20 @@ class _MobileEditorScreenState extends State<MobileEditorScreen> {
     }
   }
 
-  EngineTrackKind _engineTrackKindFor(EditorMediaTab tab) {
-    switch (tab) {
-      case EditorMediaTab.video:
-        return EngineTrackKind.video;
-      case EditorMediaTab.image:
-        return EngineTrackKind.image;
-      case EditorMediaTab.audio:
-        return EngineTrackKind.audio;
-      case EditorMediaTab.text:
-        return EngineTrackKind.text;
-      case EditorMediaTab.lipSync:
-        return EngineTrackKind.lipSync;
-    }
-  }
-
-  double _defaultDurationFor(EditorMediaTab tab) {
-    switch (tab) {
-      case EditorMediaTab.video:
-        return 5;
-      case EditorMediaTab.image:
-        return 3;
-      case EditorMediaTab.audio:
-        return 5;
-      case EditorMediaTab.text:
-        return 3;
-      case EditorMediaTab.lipSync:
-        return 3;
-    }
-  }
-
-  List<String> _allowedExtensionsFor(EditorMediaTab tab) {
-    switch (tab) {
-      case EditorMediaTab.video:
-        return const ['mp4', 'mov', 'm4v'];
-      case EditorMediaTab.image:
-        return const ['png', 'jpg', 'jpeg', 'webp', 'heic'];
-      case EditorMediaTab.audio:
-        return const ['mp3', 'wav', 'm4a', 'aac', 'ogg'];
-      case EditorMediaTab.text:
-        return const ['txt'];
-      case EditorMediaTab.lipSync:
-        return const ['png', 'jpg', 'jpeg'];
-    }
-  }
-
-  Future<_ImportedAssetMetadata> _readVideoMetadata(String path) async {
-    final metadata = await probeVideoMetadata(path);
-    return _ImportedAssetMetadata(
-      durationSeconds: metadata.durationSeconds,
-      width: metadata.width,
-      height: metadata.height,
-    );
-  }
-
-  Future<_ImportedAssetMetadata> _readVideoMetadataWithRetry(
-      String path) async {
-    var last = const _ImportedAssetMetadata();
-    for (var attempt = 0; attempt < 4; attempt++) {
-      last = await _readVideoMetadata(path);
-      if ((last.durationSeconds ?? 0) > 0 &&
-          (last.width ?? 0) > 0 &&
-          (last.height ?? 0) > 0) {
-        return last;
-      }
-      await Future<void>.delayed(Duration(milliseconds: 120 * (attempt + 1)));
-    }
-    return last;
-  }
-
-  Future<_ImportedAssetMetadata> _readImageMetadata(String path) async {
-    final metadata = await probeImageMetadata(path);
-    return _ImportedAssetMetadata(
-      width: metadata.width,
-      height: metadata.height,
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
     final currentSeconds = _effectiveCurrentSeconds;
     final isPlaying = _effectiveIsPlaying;
     final tracks = _engineController.tracks;
     final selectedClipId = _engineController.selectedClipId;
+    final diagnostics = EditorRuntimeDiagnostics.capture(
+      engineStatus: _engineController.status,
+      engineDurationSeconds: _engineController.durationSeconds,
+      previewState: _previewBackend.state,
+      compositionNodes: _compositionNodes,
+      audioNodes: _audioNodes,
+      selectedClipId: selectedClipId,
+    );
 
     return Scaffold(
       body: SafeArea(
@@ -1190,6 +971,8 @@ class _MobileEditorScreenState extends State<MobileEditorScreen> {
                       ),
                     ),
                   ),
+                  if (kDebugMode)
+                    EditorDiagnosticsPanel(diagnostics: diagnostics),
                   const SizedBox(height: 4),
                   Expanded(
                     flex: 4,
@@ -1272,32 +1055,4 @@ class _MobileEditorScreenState extends State<MobileEditorScreen> {
       ),
     );
   }
-}
-
-class _ImportedAssetFile {
-  const _ImportedAssetFile({
-    required this.path,
-    required this.name,
-    this.durationSeconds,
-    this.width,
-    this.height,
-  });
-
-  final String path;
-  final String name;
-  final double? durationSeconds;
-  final int? width;
-  final int? height;
-}
-
-class _ImportedAssetMetadata {
-  const _ImportedAssetMetadata({
-    this.durationSeconds,
-    this.width,
-    this.height,
-  });
-
-  final double? durationSeconds;
-  final int? width;
-  final int? height;
 }

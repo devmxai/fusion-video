@@ -28,6 +28,17 @@ Future<LocalMediaMetadata> probeVideoMetadata(String path) async {
   return const LocalMediaMetadata();
 }
 
+Future<LocalMediaMetadata> probeAudioMetadata(String path) async {
+  final nativeResult = await NativeMediaProbe.probe(path: path, kind: 'audio');
+  if (nativeResult != null) {
+    return LocalMediaMetadata(
+      durationSeconds: (nativeResult['durationSeconds'] as num?)?.toDouble(),
+    );
+  }
+
+  return const LocalMediaMetadata();
+}
+
 Future<LocalMediaMetadata> probeImageMetadata(String path) async {
   final nativeResult = await NativeMediaProbe.probe(path: path, kind: 'image');
   if (nativeResult != null) {

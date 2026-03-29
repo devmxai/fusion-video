@@ -23,6 +23,8 @@ class FusionPreviewSessionBridge {
     int? projectHeight,
     String? baseClipId,
     String? selectedClipId,
+    double? baseAudioGain,
+    bool? baseAudioMuted,
     List<Map<String, dynamic>>? sceneNodes,
     List<Map<String, dynamic>>? audioNodes,
   }) async {
@@ -45,6 +47,8 @@ class FusionPreviewSessionBridge {
         'projectHeight': projectHeight,
         'baseClipId': baseClipId,
         'selectedClipId': selectedClipId,
+        'baseAudioGain': baseAudioGain,
+        'baseAudioMuted': baseAudioMuted,
         'sceneNodes': sceneNodes,
         'audioNodes': audioNodes,
       });

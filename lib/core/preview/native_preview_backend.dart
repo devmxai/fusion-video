@@ -40,12 +40,13 @@ class NativePreviewBackend extends FusionPreviewBackend {
         (!nextState.isPlaying &&
             (nextState.positionSeconds - _state.positionSeconds).abs() > 0.001);
 
+    if (!shouldPush) {
+      return;
+    }
+
     _state = nextState;
     notifyListeners();
-
-    if (shouldPush) {
-      await _pushState();
-    }
+    await _pushState();
   }
 
   @override
@@ -76,6 +77,8 @@ class NativePreviewBackend extends FusionPreviewBackend {
     required List<PreviewAudioNode> audioNodes,
     String? baseClipId,
     String? selectedClipId,
+    double baseAudioGain = 1,
+    bool baseAudioMuted = false,
   }) async {
     _state = _state.copyWith(
       compositionNodes: nodes,
@@ -86,6 +89,8 @@ class NativePreviewBackend extends FusionPreviewBackend {
       clearBaseClipId: baseClipId == null,
       selectedClipId: selectedClipId,
       clearSelectedClipId: selectedClipId == null,
+      baseAudioGain: baseAudioGain,
+      baseAudioMuted: baseAudioMuted,
     );
     notifyListeners();
     await _pushState();
@@ -142,6 +147,8 @@ class NativePreviewBackend extends FusionPreviewBackend {
       projectHeight: _state.projectHeight,
       baseClipId: _state.baseClipId,
       selectedClipId: _state.selectedClipId,
+      baseAudioGain: _state.baseAudioGain,
+      baseAudioMuted: _state.baseAudioMuted,
       sceneNodes: _state.compositionNodes.map((node) => node.toMap()).toList(),
       audioNodes: _state.audioNodes.map((node) => node.toMap()).toList(),
     );
