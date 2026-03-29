@@ -5,8 +5,14 @@
 //! decoding, or rendering logic is implemented.
 
 pub mod api;
+pub mod audio_engine;
+pub mod export_engine;
 pub mod ffi;
+pub mod preview_engine;
 pub mod project;
+pub mod project_core;
+pub mod render_graph;
 pub mod timeline;
+pub mod timeline_engine;
 
 pub use api::EngineHandle;

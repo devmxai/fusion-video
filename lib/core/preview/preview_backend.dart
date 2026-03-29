@@ -5,6 +5,22 @@ enum PreviewSourceKind {
   image,
 }
 
+enum PreviewContinuityKind {
+  sameSourceContiguous,
+  sameSourceNonContiguous,
+  differentSource,
+  videoToImage,
+}
+
+enum PreviewTransportCommandKind {
+  play,
+  pause,
+  seek,
+  scrubBegin,
+  scrubUpdate,
+  scrubEnd,
+}
+
 class PreviewCompositionNode {
   const PreviewCompositionNode({
     required this.clipId,
@@ -158,6 +174,121 @@ class PreviewSource {
   }
 }
 
+class PreviewTransportCommand {
+  const PreviewTransportCommand({
+    required this.kind,
+    this.positionSeconds,
+    this.isPlaying,
+  });
+
+  final PreviewTransportCommandKind kind;
+  final double? positionSeconds;
+  final bool? isPlaying;
+
+  Map<String, dynamic> toMap() {
+    return <String, dynamic>{
+      'kind': kind.name,
+      'positionSeconds': positionSeconds,
+      'isPlaying': isPlaying,
+    };
+  }
+}
+
+class PreviewRuntimeEvent {
+  const PreviewRuntimeEvent({
+    required this.projectId,
+    required this.positionSeconds,
+    required this.isPlaying,
+    required this.transportRevision,
+    this.isBuffering = false,
+    this.frameReady = false,
+  });
+
+  final int projectId;
+  final double positionSeconds;
+  final bool isPlaying;
+  final int transportRevision;
+  final bool isBuffering;
+  final bool frameReady;
+}
+
+class ResolvedPreviewPayload {
+  const ResolvedPreviewPayload({
+    required this.projectId,
+    required this.positionSeconds,
+    required this.isPlaying,
+    required this.transportRevision,
+    required this.source,
+    required this.upcomingSource,
+    required this.projectWidth,
+    required this.projectHeight,
+    required this.compositionNodes,
+    required this.audioNodes,
+    required this.baseClipIds,
+    required this.baseClipId,
+    required this.selectedClipId,
+    required this.baseAudioGain,
+    required this.baseAudioMuted,
+    required this.continuityKind,
+  });
+
+  final int projectId;
+  final double positionSeconds;
+  final bool isPlaying;
+  final int transportRevision;
+  final PreviewSource? source;
+  final PreviewSource? upcomingSource;
+  final int projectWidth;
+  final int projectHeight;
+  final List<PreviewCompositionNode> compositionNodes;
+  final List<PreviewAudioNode> audioNodes;
+  final List<String> baseClipIds;
+  final String? baseClipId;
+  final String? selectedClipId;
+  final double baseAudioGain;
+  final bool baseAudioMuted;
+  final PreviewContinuityKind continuityKind;
+
+  Map<String, dynamic> toMap() {
+    return <String, dynamic>{
+      'projectId': projectId,
+      'positionSeconds': positionSeconds,
+      'isPlaying': isPlaying,
+      'transportRevision': transportRevision,
+      'sourceId': source?.effectiveAttachmentId,
+      'sourcePath': source?.localPath,
+      'sourceKind': switch (source?.kind) {
+        PreviewSourceKind.video => 'video',
+        PreviewSourceKind.image => 'image',
+        null => null,
+      },
+      'upcomingSourceId': upcomingSource?.effectiveAttachmentId,
+      'upcomingSourcePath': upcomingSource?.localPath,
+      'upcomingSourceKind': switch (upcomingSource?.kind) {
+        PreviewSourceKind.video => 'video',
+        PreviewSourceKind.image => 'image',
+        null => null,
+      },
+      'clipStartSeconds': source?.clipStartSeconds,
+      'clipEndSeconds': source?.clipEndSeconds,
+      'sourceStartSeconds': source?.sourceStartSeconds,
+      'sourceEndSeconds': source?.sourceEndSeconds,
+      'upcomingSourceStartSeconds': upcomingSource?.sourceStartSeconds,
+      'upcomingSourceEndSeconds': upcomingSource?.sourceEndSeconds,
+      'projectWidth': projectWidth,
+      'projectHeight': projectHeight,
+      'baseClipId': baseClipId,
+      'baseClipIds': baseClipIds,
+      'selectedClipId': selectedClipId,
+      'baseAudioGain': baseAudioGain,
+      'baseAudioMuted': baseAudioMuted,
+      'continuityKind': continuityKind.name,
+      'sceneNodes': compositionNodes.map((node) => node.toMap()).toList(),
+      'audioNodes': audioNodes.map((node) => node.toMap()).toList(),
+    };
+  }
+}
+
 class PreviewBackendState {
   const PreviewBackendState({
     this.source,
@@ -173,6 +304,8 @@ class PreviewBackendState {
     this.baseAudioMuted = false,
     this.isReady = false,
     this.isPlaying = false,
+    this.isBuffering = false,
+    this.isFrameReady = false,
     this.transportRevision = 0,
     this.positionSeconds = 0,
     this.durationSeconds = 0,
@@ -192,6 +325,8 @@ class PreviewBackendState {
   final bool baseAudioMuted;
   final bool isReady;
   final bool isPlaying;
+  final bool isBuffering;
+  final bool isFrameReady;
   final int transportRevision;
   final double positionSeconds;
   final double durationSeconds;
@@ -223,6 +358,8 @@ class PreviewBackendState {
     bool? baseAudioMuted,
     bool? isReady,
     bool? isPlaying,
+    bool? isBuffering,
+    bool? isFrameReady,
     int? transportRevision,
     double? positionSeconds,
     double? durationSeconds,
@@ -247,6 +384,8 @@ class PreviewBackendState {
       baseAudioMuted: baseAudioMuted ?? this.baseAudioMuted,
       isReady: isReady ?? this.isReady,
       isPlaying: isPlaying ?? this.isPlaying,
+      isBuffering: isBuffering ?? this.isBuffering,
+      isFrameReady: isFrameReady ?? this.isFrameReady,
       transportRevision: transportRevision ?? this.transportRevision,
       positionSeconds: positionSeconds ?? this.positionSeconds,
       durationSeconds: durationSeconds ?? this.durationSeconds,
@@ -259,6 +398,8 @@ abstract class FusionPreviewBackend extends ChangeNotifier {
   PreviewBackendState get state;
 
   Future<void> bindProject(int projectId);
+
+  Future<void> applyResolvedPayload(ResolvedPreviewPayload payload);
 
   Future<void> syncTransport({
     required double positionSeconds,
@@ -294,6 +435,12 @@ abstract class FusionPreviewBackend extends ChangeNotifier {
   Future<void> pause();
 
   Future<void> seek(double seconds);
+
+  Future<void> scrubBegin(double seconds);
+
+  Future<void> scrubUpdate(double seconds);
+
+  Future<void> scrubEnd(double seconds, {required bool isPlaying});
 
   Widget buildView({BoxFit fit = BoxFit.cover});
 

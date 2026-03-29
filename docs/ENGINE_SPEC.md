@@ -470,3 +470,25 @@ It should build only:
 - seek and scrub callbacks
 
 If this sprint is stable, the rest of the editor can grow safely on top of it.
+
+## Official Migration Rule
+
+The engine migration path is now:
+
+- parallel backend, not direct rewrite
+- Rust contracts first
+- iOS and Android adapters in the same phase
+- Flutter UI selects a preview backend but does not own media logic
+
+Current implementation rule:
+
+- `FUSION_USE_ENGINE_DRIVEN_PREVIEW=false`
+  - uses the current native preview session path as fallback
+- `FUSION_USE_ENGINE_DRIVEN_PREVIEW=true`
+  - uses the new engine-driven preview bridge and transport commands
+
+This flag exists so the repository can evolve toward:
+
+- resolved preview payloads
+- command/event transport
+- codec/render/audio adapters behind one engine-owned contract

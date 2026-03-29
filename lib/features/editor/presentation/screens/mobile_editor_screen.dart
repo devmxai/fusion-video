@@ -12,8 +12,8 @@ import '../../../../core/export/export_backend.dart';
 import '../../../../core/export/export_session_controller.dart';
 import '../../../../core/export/native_export_backend.dart';
 import '../../../../core/media/device_media_library.dart';
-import '../../../../core/preview/native_preview_backend.dart';
 import '../../../../core/preview/preview_backend.dart';
+import '../../../../core/preview/preview_backend_factory.dart';
 import '../../../../core/theme/app_theme.dart';
 import '../models/editor_media_tab.dart';
 import '../models/mock_asset_item.dart';
@@ -74,7 +74,7 @@ class _MobileEditorScreenState extends State<MobileEditorScreen> {
     _assetLibrary = ValueNotifier<List<MockAssetItem>>(
       const <MockAssetItem>[],
     );
-    _previewBackend = NativePreviewBackend(projectId: 1);
+    _previewBackend = createFusionPreviewBackend(projectId: 1);
     _exportController = FusionExportSessionController(
       backend: NativeExportBackend(),
     );
@@ -165,6 +165,14 @@ class _MobileEditorScreenState extends State<MobileEditorScreen> {
       activeBaseClipIds:
           playbackResolution?.activeClipIds ?? <String>[targetNode.clipId],
       sourcePositionSeconds: targetNode.sourcePositionSeconds,
+      continuityKind: (playbackResolution?.activeClipIds.length ?? 1) > 1
+          ? PreviewContinuityKind.sameSourceContiguous
+          : (playbackResolution?.trailingJunction?.kind ==
+                      ClipJunctionKind.videoToImage ||
+                  playbackResolution?.leadingJunction?.kind ==
+                      ClipJunctionKind.videoToImage)
+              ? PreviewContinuityKind.videoToImage
+              : PreviewContinuityKind.differentSource,
     );
   }
 
@@ -234,73 +242,25 @@ class _MobileEditorScreenState extends State<MobileEditorScreen> {
       return;
     }
     final targetAsset = resolvedPlayback.asset;
-    final activeBaseClipIds = resolvedPlayback.activeBaseClipIds;
-    await _previewBackend.updateCompositionScene(
-      projectWidth: _engineController.projectWidth,
-      projectHeight: _engineController.projectHeight,
-      nodes: EditorSceneMapper.previewCompositionNodes(
+    _previewAssetId = targetNode.assetId;
+    if (targetAsset.width != null && targetAsset.height != null) {
+      _workspaceSize = Size(
+        targetAsset.width!.toDouble(),
+        targetAsset.height!.toDouble(),
+      );
+    }
+    final previewPayload = _buildResolvedPreviewPayload(
+      playback: resolvedPlayback,
+      compositionNodes: EditorSceneMapper.previewCompositionNodes(
         _compositionNodes,
         assetLabelResolver: (assetId) => _findAssetById(assetId)?.label,
       ),
       audioNodes: EditorSceneMapper.previewAudioNodes(_audioNodes),
-      baseClipId: activeBaseClipIds.first,
-      baseClipIds: activeBaseClipIds,
-      selectedClipId: _engineController.selectedClipId,
-      baseAudioGain: baseAudioNode?.gain ?? 1,
-      baseAudioMuted: baseAudioNode?.isMuted ?? false,
+      baseAudioNode: baseAudioNode,
+      localPositionSeconds: resolvedPlayback.sourcePositionSeconds,
+      isPlaying: _engineController.isPlaying,
     );
-    final targetSource = resolvedPlayback.targetSource;
-    final upcomingSource = resolvedPlayback.upcomingSource;
-    final samePreviewStream = EditorSceneMapper.isSamePreviewStream(
-      currentSource,
-      targetSource,
-    );
-    final didAttachSource = EditorSceneMapper.shouldAttachPreviewSource(
-      currentSource,
-      targetSource,
-    );
-    final didChangeUpcomingSource = EditorSceneMapper.hasPreviewSourceChanged(
-      _previewBackend.state.upcomingSource,
-      upcomingSource,
-    );
-    if (didAttachSource || didChangeUpcomingSource) {
-      if (samePreviewStream) {
-        _previewAssetId = targetNode.assetId;
-        await _previewBackend.updateSource(
-          targetSource,
-          upcomingSource: upcomingSource,
-        );
-      } else {
-        await _activatePreviewForAsset(
-          targetAsset,
-          autoplay: _engineController.isPlaying,
-          previewSource: targetSource,
-          upcomingSource: upcomingSource,
-        );
-      }
-    } else {
-      _previewAssetId = targetNode.assetId;
-    }
-
-    final previewState = _previewBackend.state;
-    final localPositionSeconds = resolvedPlayback.sourcePositionSeconds;
-    final positionDelta =
-        (previewState.positionSeconds - localPositionSeconds).abs();
-    final pausedTransportNeedsSync = !_engineController.isPlaying &&
-        (previewState.isPlaying || positionDelta > 0.034);
-    final shouldForce = (didAttachSource && !samePreviewStream) ||
-        previewState.isPlaying != _engineController.isPlaying;
-    final shouldSyncTransport = (didAttachSource &&
-            (!samePreviewStream || !_engineController.isPlaying)) ||
-        _engineController.isPlaying != previewState.isPlaying ||
-        pausedTransportNeedsSync;
-    if (shouldSyncTransport) {
-      await _previewBackend.syncTransport(
-        positionSeconds: localPositionSeconds,
-        isPlaying: _engineController.isPlaying,
-        force: shouldForce,
-      );
-    }
+    await _previewBackend.applyResolvedPayload(previewPayload);
   }
 
   Future<void> _schedulePreviewSceneSync() {
@@ -568,12 +528,9 @@ class _MobileEditorScreenState extends State<MobileEditorScreen> {
     _pendingPreviewSeekSeconds = null;
     _previewSeekInFlight = true;
     unawaited(
-      _previewBackend
-          .syncTransport(
-        positionSeconds: pending,
-        isPlaying: false,
-        force: true,
-      )
+      ((_isTimelineScrubbing)
+              ? _previewBackend.scrubUpdate(pending)
+              : _previewBackend.seek(pending))
           .whenComplete(() {
         _previewSeekInFlight = false;
         if (_pendingPreviewSeekSeconds != null) {
@@ -688,10 +645,9 @@ class _MobileEditorScreenState extends State<MobileEditorScreen> {
               }
             }
           }
-          final localSeconds =
-              resolvedPlayback?.sourcePositionSeconds ??
-                  node?.sourcePositionSeconds ??
-                  playheadSeconds;
+          final localSeconds = resolvedPlayback?.sourcePositionSeconds ??
+              node?.sourcePositionSeconds ??
+              playheadSeconds;
           await _engineController.play();
           await _previewBackend.syncTransport(
             positionSeconds: localSeconds,
@@ -804,8 +760,17 @@ class _MobileEditorScreenState extends State<MobileEditorScreen> {
       return;
     }
     _isTimelineScrubbing = isActive;
+    if (isActive) {
+      unawaited(_previewBackend.scrubBegin(_effectiveCurrentSeconds));
+    }
     if (!isActive) {
       _flushPreviewSeek();
+      unawaited(
+        _previewBackend.scrubEnd(
+          _effectiveCurrentSeconds,
+          isPlaying: _engineController.isPlaying,
+        ),
+      );
       final timelinePreviewSeconds = _timelinePreviewSeconds;
       if (timelinePreviewSeconds != null &&
           (timelinePreviewSeconds - _engineController.currentSeconds).abs() <=
@@ -967,6 +932,36 @@ class _MobileEditorScreenState extends State<MobileEditorScreen> {
     return EditorSceneMapper.previewSourceForNode(
       node,
       descriptor: descriptor,
+    );
+  }
+
+  ResolvedPreviewPayload _buildResolvedPreviewPayload({
+    required _ResolvedPreviewPlayback playback,
+    required List<PreviewCompositionNode> compositionNodes,
+    required List<PreviewAudioNode> audioNodes,
+    required EngineAudioNodeSnapshot? baseAudioNode,
+    required double localPositionSeconds,
+    required bool isPlaying,
+  }) {
+    return ResolvedPreviewPayload(
+      projectId: _engineController.projectHandle?.id ?? 1,
+      positionSeconds: localPositionSeconds,
+      isPlaying: isPlaying,
+      transportRevision: _previewBackend.state.transportRevision,
+      source: playback.targetSource,
+      upcomingSource: playback.upcomingSource,
+      projectWidth: _engineController.projectWidth,
+      projectHeight: _engineController.projectHeight,
+      compositionNodes: compositionNodes,
+      audioNodes: audioNodes,
+      baseClipIds: playback.activeBaseClipIds,
+      baseClipId: playback.activeBaseClipIds.isEmpty
+          ? null
+          : playback.activeBaseClipIds.first,
+      selectedClipId: _engineController.selectedClipId,
+      baseAudioGain: baseAudioNode?.gain ?? 1,
+      baseAudioMuted: baseAudioNode?.isMuted ?? false,
+      continuityKind: playback.continuityKind,
     );
   }
 
@@ -1511,6 +1506,7 @@ class _ResolvedPreviewPlayback {
     required this.upcomingSource,
     required this.activeBaseClipIds,
     required this.sourcePositionSeconds,
+    required this.continuityKind,
   });
 
   final MockAssetItem asset;
@@ -1518,4 +1514,5 @@ class _ResolvedPreviewPlayback {
   final PreviewSource? upcomingSource;
   final List<String> activeBaseClipIds;
   final double sourcePositionSeconds;
+  final PreviewContinuityKind continuityKind;
 }

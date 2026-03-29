@@ -25,6 +25,43 @@ class NativePreviewBackend extends FusionPreviewBackend {
   }
 
   @override
+  Future<void> applyResolvedPayload(ResolvedPreviewPayload payload) async {
+    _state = _state.copyWith(
+      source: payload.source,
+      clearSource: payload.source == null,
+      upcomingSource: payload.upcomingSource,
+      clearUpcomingSource: payload.upcomingSource == null,
+      compositionNodes: payload.compositionNodes,
+      audioNodes: payload.audioNodes,
+      projectWidth: payload.projectWidth,
+      projectHeight: payload.projectHeight,
+      baseClipId: payload.baseClipId,
+      clearBaseClipId: payload.baseClipId == null,
+      baseClipIds: payload.baseClipIds,
+      selectedClipId: payload.selectedClipId,
+      clearSelectedClipId: payload.selectedClipId == null,
+      baseAudioGain: payload.baseAudioGain,
+      baseAudioMuted: payload.baseAudioMuted,
+      isReady: payload.source != null,
+      isPlaying: payload.isPlaying,
+      transportRevision: payload.transportRevision,
+      positionSeconds: payload.positionSeconds,
+      durationSeconds: payload.source?.effectiveDurationSeconds ?? 0,
+      contentSize:
+          (payload.source?.width != null && payload.source?.height != null)
+              ? Size(
+                  payload.source!.width!.toDouble(),
+                  payload.source!.height!.toDouble(),
+                )
+              : null,
+      clearContentSize: payload.source == null,
+      isFrameReady: payload.source != null,
+    );
+    notifyListeners();
+    await _pushState();
+  }
+
+  @override
   Future<void> syncTransport({
     required double positionSeconds,
     required bool isPlaying,
@@ -40,8 +77,7 @@ class NativePreviewBackend extends FusionPreviewBackend {
         (!baseState.isPlaying &&
             (baseState.positionSeconds - _state.positionSeconds).abs() > 0.001);
     final nextState = baseState.copyWith(
-      transportRevision:
-          _state.transportRevision + (shouldPush ? 1 : 0),
+      transportRevision: _state.transportRevision + (shouldPush ? 1 : 0),
     );
 
     _state = nextState;
@@ -150,6 +186,33 @@ class NativePreviewBackend extends FusionPreviewBackend {
     await syncTransport(
       positionSeconds: seconds,
       isPlaying: _state.isPlaying,
+      force: true,
+    );
+  }
+
+  @override
+  Future<void> scrubBegin(double seconds) async {
+    await syncTransport(
+      positionSeconds: seconds,
+      isPlaying: false,
+      force: true,
+    );
+  }
+
+  @override
+  Future<void> scrubUpdate(double seconds) async {
+    await syncTransport(
+      positionSeconds: seconds,
+      isPlaying: false,
+      force: true,
+    );
+  }
+
+  @override
+  Future<void> scrubEnd(double seconds, {required bool isPlaying}) async {
+    await syncTransport(
+      positionSeconds: seconds,
+      isPlaying: isPlaying,
       force: true,
     );
   }

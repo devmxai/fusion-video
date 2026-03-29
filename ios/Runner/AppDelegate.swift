@@ -4,6 +4,8 @@ import AVFoundation
 
 @UIApplicationMain
 @objc class AppDelegate: FlutterAppDelegate {
+  private let previewEngineHost = FusionPreviewEngineHost()
+
   override func application(
     _ application: UIApplication,
     didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
@@ -13,6 +15,14 @@ import AVFoundation
       registrar.register(FusionPreviewViewFactory(), withId: "fusion_video/preview_surface")
       let channel = FlutterMethodChannel(
         name: "fusion_video/preview_session",
+        binaryMessenger: registrar.messenger()
+      )
+      let previewEngineChannel = FlutterMethodChannel(
+        name: "fusion_video/preview_engine",
+        binaryMessenger: registrar.messenger()
+      )
+      let previewEventsChannel = FlutterEventChannel(
+        name: "fusion_video/preview_events",
         binaryMessenger: registrar.messenger()
       )
       let probeChannel = FlutterMethodChannel(
@@ -192,6 +202,122 @@ import AVFoundation
         )
         result(nil)
       }
+      previewEngineChannel.setMethodCallHandler { call, result in
+        switch call.method {
+        case "isEnginePreviewAvailable":
+          result(self.previewEngineHost.isScaffoldReady)
+        case "configurePreviewEngine":
+          guard
+            let args = call.arguments as? [String: Any],
+            let projectId = args["projectId"] as? Int64,
+            let positionSeconds = args["positionSeconds"] as? Double,
+            let isPlaying = args["isPlaying"] as? Bool
+          else {
+            result(
+              FlutterError(
+                code: "invalid_args",
+                message: "Missing preview engine arguments",
+                details: nil
+              )
+            )
+            return
+          }
+
+          self.previewEngineHost.configurePreviewEngine(
+            FusionPreviewResolvedConfiguration(
+              projectId: projectId,
+              positionSeconds: positionSeconds,
+              isPlaying: isPlaying,
+              transportRevision: (args["transportRevision"] as? NSNumber)?.int64Value ?? 0,
+              sourceId: args["sourceId"] as? String,
+              sourcePath: args["sourcePath"] as? String,
+              sourceKind: args["sourceKind"] as? String,
+              upcomingSourceId: args["upcomingSourceId"] as? String,
+              upcomingSourcePath: args["upcomingSourcePath"] as? String,
+              upcomingSourceKind: args["upcomingSourceKind"] as? String,
+              clipStartSeconds: args["clipStartSeconds"] as? Double,
+              clipEndSeconds: args["clipEndSeconds"] as? Double,
+              sourceStartSeconds: args["sourceStartSeconds"] as? Double,
+              sourceEndSeconds: args["sourceEndSeconds"] as? Double,
+              upcomingSourceStartSeconds: args["upcomingSourceStartSeconds"] as? Double,
+              upcomingSourceEndSeconds: args["upcomingSourceEndSeconds"] as? Double,
+              projectWidth: args["projectWidth"] as? Int,
+              projectHeight: args["projectHeight"] as? Int,
+              baseClipId: args["baseClipId"] as? String,
+              baseClipIds: args["baseClipIds"] as? [String] ?? [],
+              selectedClipId: args["selectedClipId"] as? String,
+              continuityKind: args["continuityKind"] as? String,
+              sceneNodes: args["sceneNodes"] as? [[String: Any]] ?? [],
+              audioNodes: args["audioNodes"] as? [[String: Any]] ?? []
+            )
+          )
+
+          FusionPreviewRegistry.shared.update(
+            projectId: projectId,
+            transportRevision: (args["transportRevision"] as? NSNumber)?.int64Value ?? 0,
+            sourceId: args["sourceId"] as? String,
+            sourcePath: args["sourcePath"] as? String,
+            sourceKind: args["sourceKind"] as? String,
+            upcomingSourceId: args["upcomingSourceId"] as? String,
+            upcomingSourcePath: args["upcomingSourcePath"] as? String,
+            upcomingSourceKind: args["upcomingSourceKind"] as? String,
+            clipStartSeconds: args["clipStartSeconds"] as? Double,
+            clipEndSeconds: args["clipEndSeconds"] as? Double,
+            sourceStartSeconds: args["sourceStartSeconds"] as? Double,
+            sourceEndSeconds: args["sourceEndSeconds"] as? Double,
+            upcomingSourceStartSeconds: args["upcomingSourceStartSeconds"] as? Double,
+            upcomingSourceEndSeconds: args["upcomingSourceEndSeconds"] as? Double,
+            projectWidth: args["projectWidth"] as? Int,
+            projectHeight: args["projectHeight"] as? Int,
+            baseClipId: args["baseClipId"] as? String,
+            baseClipIds: args["baseClipIds"] as? [String] ?? [],
+            selectedClipId: args["selectedClipId"] as? String,
+            baseAudioGain: args["baseAudioGain"] as? Double,
+            baseAudioMuted: args["baseAudioMuted"] as? Bool,
+            sceneNodes: args["sceneNodes"] as? [[String: Any]] ?? [],
+            audioNodes: args["audioNodes"] as? [[String: Any]] ?? [],
+            positionSeconds: positionSeconds,
+            isPlaying: isPlaying
+          )
+          result(nil)
+        case "dispatchPreviewCommand":
+          guard
+            let args = call.arguments as? [String: Any],
+            let projectId = args["projectId"] as? Int64,
+            let transportRevision = (args["transportRevision"] as? NSNumber)?.int64Value,
+            let commandKind = args["kind"] as? String
+          else {
+            result(
+              FlutterError(
+                code: "invalid_args",
+                message: "Missing preview command arguments",
+                details: nil
+              )
+            )
+            return
+          }
+          self.previewEngineHost.dispatchPreviewCommand(
+            FusionPreviewTransportCommandEnvelope(
+              projectId: projectId,
+              transportRevision: transportRevision,
+              kind: commandKind,
+              positionSeconds: args["positionSeconds"] as? Double,
+              isPlaying: args["isPlaying"] as? Bool
+            )
+          )
+          FusionPreviewRegistry.shared.dispatchCommand(
+            projectId: projectId,
+            transportRevision: transportRevision,
+            commandKind: commandKind,
+            positionSeconds: args["positionSeconds"] as? Double,
+            isPlaying: args["isPlaying"] as? Bool
+          )
+          result(nil)
+        default:
+          result(FlutterMethodNotImplemented)
+        }
+      }
+      previewEventsChannel.setStreamHandler(FusionPreviewEventsStreamHandler.shared)
     }
     return super.application(application, didFinishLaunchingWithOptions: launchOptions)
   }
@@ -971,6 +1097,7 @@ private final class FusionPreviewRegistry {
 
   private var views: [Int64: NSHashTable<FusionPreviewNativeView>] = [:]
   private var payloads: [Int64: FusionPreviewPayload] = [:]
+  private var eventSink: FlutterEventSink?
 
   private init() {}
 
@@ -1093,6 +1220,119 @@ private final class FusionPreviewRegistry {
         isPlaying: isPlaying
       )
     }
+    emitRuntimeEvent(projectId: projectId, payload: payloads[projectId]!)
+  }
+
+  func dispatchCommand(
+    projectId: Int64,
+    transportRevision: Int64,
+    commandKind: String,
+    positionSeconds: Double?,
+    isPlaying: Bool?
+  ) {
+    let current = payloads[projectId] ?? FusionPreviewPayload(
+      transportRevision: transportRevision,
+      sourceId: nil,
+      sourcePath: nil,
+      sourceKind: nil,
+      upcomingSourceId: nil,
+      upcomingSourcePath: nil,
+      upcomingSourceKind: nil,
+      clipStartSeconds: nil,
+      clipEndSeconds: nil,
+      sourceStartSeconds: nil,
+      sourceEndSeconds: nil,
+      upcomingSourceStartSeconds: nil,
+      upcomingSourceEndSeconds: nil,
+      projectWidth: nil,
+      projectHeight: nil,
+      baseClipId: nil,
+      baseClipIds: [],
+      selectedClipId: nil,
+      baseAudioGain: nil,
+      baseAudioMuted: nil,
+      sceneNodes: [],
+      audioNodes: [],
+      positionSeconds: positionSeconds ?? 0,
+      isPlaying: false
+    )
+    let nextIsPlaying = isPlaying ?? {
+      switch commandKind {
+      case "play":
+        return true
+      case "pause":
+        return false
+      default:
+        return current.isPlaying
+      }
+    }()
+    update(
+      projectId: projectId,
+      transportRevision: transportRevision,
+      sourceId: current.sourceId,
+      sourcePath: current.sourcePath,
+      sourceKind: current.sourceKind,
+      upcomingSourceId: current.upcomingSourceId,
+      upcomingSourcePath: current.upcomingSourcePath,
+      upcomingSourceKind: current.upcomingSourceKind,
+      clipStartSeconds: current.clipStartSeconds,
+      clipEndSeconds: current.clipEndSeconds,
+      sourceStartSeconds: current.sourceStartSeconds,
+      sourceEndSeconds: current.sourceEndSeconds,
+      upcomingSourceStartSeconds: current.upcomingSourceStartSeconds,
+      upcomingSourceEndSeconds: current.upcomingSourceEndSeconds,
+      projectWidth: current.projectWidth,
+      projectHeight: current.projectHeight,
+      baseClipId: current.baseClipId,
+      baseClipIds: current.baseClipIds,
+      selectedClipId: current.selectedClipId,
+      baseAudioGain: current.baseAudioGain,
+      baseAudioMuted: current.baseAudioMuted,
+      sceneNodes: current.sceneNodes,
+      audioNodes: current.audioNodes,
+      positionSeconds: positionSeconds ?? current.positionSeconds,
+      isPlaying: nextIsPlaying
+    )
+  }
+
+  func setEventSink(_ sink: FlutterEventSink?) {
+    eventSink = sink
+    guard let sink else { return }
+    for (projectId, payload) in payloads {
+      emitRuntimeEvent(projectId: projectId, payload: payload, sink: sink)
+    }
+  }
+
+  private func emitRuntimeEvent(
+    projectId: Int64,
+    payload: FusionPreviewPayload,
+    sink: FlutterEventSink? = nil
+  ) {
+    let event: [String: Any] = [
+      "projectId": projectId,
+      "positionSeconds": payload.positionSeconds,
+      "isPlaying": payload.isPlaying,
+      "transportRevision": payload.transportRevision,
+      "isBuffering": false,
+      "frameReady": payload.sourceId != nil || payload.sourcePath != nil,
+    ]
+    (sink ?? eventSink)?(event)
+  }
+}
+
+private final class FusionPreviewEventsStreamHandler: NSObject, FlutterStreamHandler {
+  static let shared = FusionPreviewEventsStreamHandler()
+
+  func onListen(withArguments arguments: Any?, eventSink events: @escaping FlutterEventSink)
+    -> FlutterError?
+  {
+    FusionPreviewRegistry.shared.setEventSink(events)
+    return nil
+  }
+
+  func onCancel(withArguments arguments: Any?) -> FlutterError? {
+    FusionPreviewRegistry.shared.setEventSink(nil)
+    return nil
   }
 }
 

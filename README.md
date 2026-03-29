@@ -177,6 +177,43 @@ The current native preview stack is:
 
 This is still a preview/compositor-foundation implementation, not yet the final production compositor/render/export engine.
 
+The repository now also includes a parallel engine-driven preview migration path behind:
+
+- `--dart-define=FUSION_USE_ENGINE_DRIVEN_PREVIEW=true`
+
+This new path is intended to move preview toward:
+
+- resolved preview payloads
+- command/event transport
+- backend selection instead of hard-wiring the editor screen to one preview implementation
+- future MediaCodec/OpenGL ES and iOS-equivalent engine adapters without rewriting Flutter UI again
+
+Current migration checkpoint in this repository already includes:
+
+- a Flutter preview backend selector with legacy fallback still intact
+- an engine-driven preview backend that consumes one authoritative payload shape
+- native `preview_engine` / `preview_events` bridge channels on iOS and Android
+- Android preview-engine scaffolding modules for:
+  - media I/O
+  - decode scheduling
+  - preview rendering
+  - audio engine
+  - export pipeline
+- iOS preview-engine host scaffolding mirroring the same transport contract
+- Rust module boundaries for:
+  - `project_core`
+  - `timeline_engine`
+  - `preview_engine`
+  - `render_graph`
+  - `audio_engine`
+  - `export_engine`
+
+This is intentionally a migration checkpoint, not the final Android professional engine yet. The production target remains:
+
+- Rust-owned timeline/state/transport authority
+- Android decode/render/audio/export adapters behind one engine contract
+- iOS parity in the same implementation phase, not as a later rewrite
+
 ### Compositor Foundation
 
 The engine now exposes scene-oriented data instead of a single flat media binding.

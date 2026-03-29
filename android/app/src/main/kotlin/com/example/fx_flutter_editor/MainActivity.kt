@@ -22,8 +22,12 @@ import android.view.View
 import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.TextView
+import com.example.fx_flutter_editor.previewengine.FusionAndroidPreviewEngine
+import com.example.fx_flutter_editor.previewengine.PreviewTransportCommandEnvelope
+import com.example.fx_flutter_editor.previewengine.ResolvedPreviewConfiguration
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
+import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodChannel
 import io.flutter.plugin.common.StandardMessageCodec
 import io.flutter.plugin.platform.PlatformView
@@ -35,6 +39,7 @@ import kotlin.math.roundToInt
 class MainActivity : FlutterActivity() {
     private val mediaThumbnailExecutor = Executors.newSingleThreadExecutor()
     private val mainHandler = Handler(Looper.getMainLooper())
+    private val previewEngine = FusionAndroidPreviewEngine()
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -121,6 +126,139 @@ class MainActivity : FlutterActivity() {
             )
             result.success(null)
         }
+
+        MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            "fusion_video/preview_engine",
+        ).setMethodCallHandler { call, result ->
+            val args = call.arguments as? Map<*, *>
+            when (call.method) {
+                "isEnginePreviewAvailable" -> result.success(previewEngine.isScaffoldReady)
+                "configurePreviewEngine" -> {
+                    val projectId = (args?.get("projectId") as? Number)?.toInt()
+                    val positionSeconds = (args?.get("positionSeconds") as? Number)?.toDouble()
+                    val isPlaying = args?.get("isPlaying") as? Boolean
+                    if (projectId == null || positionSeconds == null || isPlaying == null) {
+                        result.error("invalid_args", "Missing preview engine arguments", null)
+                        return@setMethodCallHandler
+                    }
+                    FusionPreviewRegistry.update(
+                        projectId,
+                        (args["transportRevision"] as? Number)?.toInt() ?: 0,
+                        args["sourceId"] as? String,
+                        args["sourcePath"] as? String,
+                        args["sourceKind"] as? String,
+                        args["upcomingSourceId"] as? String,
+                        args["upcomingSourcePath"] as? String,
+                        args["upcomingSourceKind"] as? String,
+                        (args["clipStartSeconds"] as? Number)?.toDouble(),
+                        (args["clipEndSeconds"] as? Number)?.toDouble(),
+                        (args["sourceStartSeconds"] as? Number)?.toDouble(),
+                        (args["sourceEndSeconds"] as? Number)?.toDouble(),
+                        (args["upcomingSourceStartSeconds"] as? Number)?.toDouble(),
+                        (args["upcomingSourceEndSeconds"] as? Number)?.toDouble(),
+                        (args["projectWidth"] as? Number)?.toInt(),
+                        (args["projectHeight"] as? Number)?.toInt(),
+                        args["baseClipId"] as? String,
+                        (args["baseClipIds"] as? List<*>)?.mapNotNull { it as? String }
+                            ?: emptyList(),
+                        args["selectedClipId"] as? String,
+                        (args["sceneNodes"] as? List<*>)
+                            ?.mapNotNull { it as? Map<*, *> }
+                            ?.map { map ->
+                                map.entries
+                                    .filter { it.key is String }
+                                    .associate { it.key as String to it.value }
+                            }
+                            ?: emptyList(),
+                        positionSeconds,
+                        isPlaying,
+                    )
+                    previewEngine.configure(
+                        ResolvedPreviewConfiguration(
+                            projectId = projectId,
+                            positionSeconds = positionSeconds,
+                            isPlaying = isPlaying,
+                            transportRevision = (args["transportRevision"] as? Number)?.toInt() ?: 0,
+                            sourceId = args["sourceId"] as? String,
+                            sourcePath = args["sourcePath"] as? String,
+                            sourceKind = args["sourceKind"] as? String,
+                            upcomingSourceId = args["upcomingSourceId"] as? String,
+                            upcomingSourcePath = args["upcomingSourcePath"] as? String,
+                            upcomingSourceKind = args["upcomingSourceKind"] as? String,
+                            clipStartSeconds = (args["clipStartSeconds"] as? Number)?.toDouble(),
+                            clipEndSeconds = (args["clipEndSeconds"] as? Number)?.toDouble(),
+                            sourceStartSeconds = (args["sourceStartSeconds"] as? Number)?.toDouble(),
+                            sourceEndSeconds = (args["sourceEndSeconds"] as? Number)?.toDouble(),
+                            upcomingSourceStartSeconds =
+                                (args["upcomingSourceStartSeconds"] as? Number)?.toDouble(),
+                            upcomingSourceEndSeconds =
+                                (args["upcomingSourceEndSeconds"] as? Number)?.toDouble(),
+                            projectWidth = (args["projectWidth"] as? Number)?.toInt(),
+                            projectHeight = (args["projectHeight"] as? Number)?.toInt(),
+                            baseClipId = args["baseClipId"] as? String,
+                            baseClipIds =
+                                (args["baseClipIds"] as? List<*>)?.mapNotNull { it as? String }
+                                    ?: emptyList(),
+                            selectedClipId = args["selectedClipId"] as? String,
+                            continuityKind = args["continuityKind"] as? String,
+                            sceneNodes =
+                                (args["sceneNodes"] as? List<*>)
+                                    ?.mapNotNull { it as? Map<*, *> }
+                                    ?.map { map ->
+                                        map.entries
+                                            .filter { it.key is String }
+                                            .associate { it.key as String to it.value }
+                                    }
+                                    ?: emptyList(),
+                            audioNodes =
+                                (args["audioNodes"] as? List<*>)
+                                    ?.mapNotNull { it as? Map<*, *> }
+                                    ?.map { map ->
+                                        map.entries
+                                            .filter { it.key is String }
+                                            .associate { it.key as String to it.value }
+                                    }
+                                    ?: emptyList(),
+                        )
+                    )
+                    result.success(null)
+                }
+                "dispatchPreviewCommand" -> {
+                    val projectId = (args?.get("projectId") as? Number)?.toInt()
+                    val transportRevision =
+                        (args?.get("transportRevision") as? Number)?.toInt() ?: 0
+                    val kind = args?.get("kind") as? String
+                    if (projectId == null || kind == null) {
+                        result.error("invalid_args", "Missing preview command arguments", null)
+                        return@setMethodCallHandler
+                    }
+                    previewEngine.dispatch(
+                        PreviewTransportCommandEnvelope(
+                            projectId = projectId,
+                            transportRevision = transportRevision,
+                            kind = kind,
+                            positionSeconds = (args["positionSeconds"] as? Number)?.toDouble(),
+                            isPlaying = args["isPlaying"] as? Boolean,
+                        )
+                    )
+                    FusionPreviewRegistry.dispatchCommand(
+                        projectId = projectId,
+                        transportRevision = transportRevision,
+                        commandKind = kind,
+                        positionSeconds = (args["positionSeconds"] as? Number)?.toDouble(),
+                        isPlaying = args["isPlaying"] as? Boolean,
+                    )
+                    result.success(null)
+                }
+                else -> result.notImplemented()
+            }
+        }
+
+        EventChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            "fusion_video/preview_events",
+        ).setStreamHandler(FusionPreviewEventsStreamHandler)
 
         MethodChannel(
             flutterEngine.dartExecutor.binaryMessenger,
@@ -311,6 +449,7 @@ private object FusionMediaThumbnailGenerator {
 private object FusionPreviewRegistry {
     private val views = mutableMapOf<Int, MutableList<FusionPreviewNativeView>>()
     private val payloads = mutableMapOf<Int, FusionPreviewPayload>()
+    private var eventSink: EventChannel.EventSink? = null
 
     fun attach(projectId: Int, view: FusionPreviewNativeView) {
         val bucket = views.getOrPut(projectId) { mutableListOf() }
@@ -418,6 +557,117 @@ private object FusionPreviewRegistry {
                 isPlaying,
             )
         }
+        emitRuntimeEvent(projectId, payloads.getValue(projectId))
+    }
+
+    fun dispatchCommand(
+        projectId: Int,
+        transportRevision: Int,
+        commandKind: String,
+        positionSeconds: Double?,
+        isPlaying: Boolean?,
+    ) {
+        val current = payloads[projectId] ?: FusionPreviewPayload(
+            transportRevision = transportRevision,
+            sourceId = null,
+            sourcePath = null,
+            sourceKind = null,
+            upcomingSourceId = null,
+            upcomingSourcePath = null,
+            upcomingSourceKind = null,
+            clipStartSeconds = null,
+            clipEndSeconds = null,
+            sourceStartSeconds = null,
+            sourceEndSeconds = null,
+            upcomingSourceStartSeconds = null,
+            upcomingSourceEndSeconds = null,
+            projectWidth = null,
+            projectHeight = null,
+            baseClipId = null,
+            baseClipIds = emptyList(),
+            selectedClipId = null,
+            sceneNodes = emptyList(),
+            positionSeconds = positionSeconds ?: 0.0,
+            isPlaying = false,
+        )
+        val nextIsPlaying = isPlaying ?: when (commandKind) {
+            "play" -> true
+            "pause" -> false
+            else -> current.isPlaying
+        }
+        update(
+            projectId = projectId,
+            transportRevision = transportRevision,
+            sourceId = current.sourceId,
+            sourcePath = current.sourcePath,
+            sourceKind = current.sourceKind,
+            upcomingSourceId = current.upcomingSourceId,
+            upcomingSourcePath = current.upcomingSourcePath,
+            upcomingSourceKind = current.upcomingSourceKind,
+            clipStartSeconds = current.clipStartSeconds,
+            clipEndSeconds = current.clipEndSeconds,
+            sourceStartSeconds = current.sourceStartSeconds,
+            sourceEndSeconds = current.sourceEndSeconds,
+            upcomingSourceStartSeconds = current.upcomingSourceStartSeconds,
+            upcomingSourceEndSeconds = current.upcomingSourceEndSeconds,
+            projectWidth = current.projectWidth,
+            projectHeight = current.projectHeight,
+            baseClipId = current.baseClipId,
+            baseClipIds = current.baseClipIds,
+            selectedClipId = current.selectedClipId,
+            sceneNodes = current.sceneNodes,
+            positionSeconds = positionSeconds ?: current.positionSeconds,
+            isPlaying = nextIsPlaying,
+        )
+    }
+
+    fun addEventSink(sink: EventChannel.EventSink) {
+        eventSink = sink
+        payloads.forEach { (projectId, payload) ->
+            emitRuntimeEvent(projectId, payload, sink)
+        }
+    }
+
+    fun removeEventSink(sink: EventChannel.EventSink) {
+        if (eventSink == sink) {
+            eventSink = null
+        }
+    }
+
+    private fun emitRuntimeEvent(
+        projectId: Int,
+        payload: FusionPreviewPayload,
+        sink: EventChannel.EventSink? = null,
+    ) {
+        val event = mapOf(
+            "projectId" to projectId,
+            "positionSeconds" to payload.positionSeconds,
+            "isPlaying" to payload.isPlaying,
+            "transportRevision" to payload.transportRevision,
+            "isBuffering" to false,
+            "frameReady" to (payload.sourceId != null || payload.sourcePath != null),
+        )
+        if (sink != null) {
+            sink.success(event)
+            return
+        }
+        eventSink?.success(event)
+    }
+}
+
+private object FusionPreviewEventsStreamHandler : EventChannel.StreamHandler {
+    private var currentSink: EventChannel.EventSink? = null
+
+    override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
+        if (events != null) {
+            currentSink = events
+            FusionPreviewRegistry.addEventSink(events)
+        }
+    }
+
+    override fun onCancel(arguments: Any?) {
+        currentSink?.let(FusionPreviewRegistry::removeEventSink)
+        currentSink = null
     }
 }
 
