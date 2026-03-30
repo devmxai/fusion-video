@@ -35,6 +35,7 @@ pub struct ClipState {
     pub source_offset_seconds: f64,
     pub duration_seconds: f64,
     pub clip_type: ClipType,
+    pub visual_transform: Option<VisualTransformState>,
     pub split_group_id: Option<String>,
     pub audio_gain: f64,
     pub is_muted: bool,
@@ -96,6 +97,7 @@ impl ClipState {
             source_offset_seconds: 0.0,
             duration_seconds,
             clip_type: ClipType::Media,
+            visual_transform: None,
             split_group_id: None,
             audio_gain: 1.0,
             is_muted: false,
@@ -109,6 +111,7 @@ impl ClipState {
             source_offset_seconds: 0.0,
             duration_seconds,
             clip_type: ClipType::Placeholder,
+            visual_transform: None,
             split_group_id: None,
             audio_gain: 1.0,
             is_muted: false,
@@ -197,6 +200,7 @@ impl ProjectState {
             source_offset_seconds: clip.source_offset_seconds,
             duration_seconds: left_duration,
             clip_type: clip.clip_type,
+            visual_transform: clip.visual_transform.clone(),
             split_group_id: Some(split_group_id.clone()),
             audio_gain: clip.audio_gain,
             is_muted: clip.is_muted,
@@ -207,6 +211,7 @@ impl ProjectState {
             source_offset_seconds: clip.source_offset_seconds + left_duration,
             duration_seconds: right_duration,
             clip_type: clip.clip_type,
+            visual_transform: clip.visual_transform.clone(),
             split_group_id: Some(split_group_id),
             audio_gain: clip.audio_gain,
             is_muted: clip.is_muted,
@@ -294,6 +299,7 @@ impl ProjectState {
             source_offset_seconds: original.source_offset_seconds,
             duration_seconds: original.duration_seconds,
             clip_type: original.clip_type,
+            visual_transform: original.visual_transform.clone(),
             split_group_id: None,
             audio_gain: original.audio_gain,
             is_muted: original.is_muted,
@@ -360,6 +366,7 @@ impl ProjectState {
             } else {
                 ClipType::Placeholder
             },
+            visual_transform: None,
             split_group_id: None,
             audio_gain: 1.0,
             is_muted: false,
@@ -430,7 +437,9 @@ impl ProjectState {
                     source_start_seconds,
                     source_end_seconds: source_start_seconds + clip.duration_seconds,
                     source_position_seconds,
-                    transform: default_transform_for_track(self.width, self.height, track.kind),
+                    transform: clip.visual_transform.clone().unwrap_or_else(|| {
+                        default_transform_for_track(self.width, self.height, track.kind)
+                    }),
                 });
             }
         }
@@ -465,6 +474,20 @@ impl ProjectState {
         }
 
         clip.is_muted = is_muted;
+        true
+    }
+
+    pub fn set_clip_transform(&mut self, clip_id: &str, transform: VisualTransformState) -> bool {
+        let Some(location) = self.find_clip(clip_id) else {
+            return false;
+        };
+
+        let clip = &mut self.tracks[location.track_index].clips[location.clip_index];
+        if clip.clip_type != ClipType::Media {
+            return false;
+        }
+
+        clip.visual_transform = Some(transform);
         true
     }
 
@@ -693,7 +716,7 @@ fn track_sort_key(kind: TrackKind) -> u8 {
 
 #[cfg(test)]
 mod tests {
-    use super::{AssetState, ClipType, ProjectState, TrackKind};
+    use super::{AssetState, ClipType, ProjectState, TrackKind, VisualTransformState};
 
     fn project() -> ProjectState {
         ProjectState::new(1080, 1920, 30.0, 48_000, 5.0)
@@ -940,6 +963,48 @@ mod tests {
         assert_eq!(video_track.clips.len(), 2);
         assert!(video_track.clips[1].id.contains("_copy_"));
         assert!((video_track.clips[0].duration_seconds - 1.5).abs() < 0.001);
+    }
+
+    #[test]
+    fn clip_transform_persists_through_split_and_duplicate() {
+        let mut project = project();
+        project.import_asset(AssetState {
+            id: "video-1".into(),
+            uri: "/tmp/video-1.mp4".into(),
+            kind: TrackKind::Video,
+            label: Some("video-1.mp4".into()),
+            duration_seconds: Some(4.0),
+            width: Some(1080),
+            height: Some(1920),
+        });
+
+        assert!(project.insert_clip(TrackKind::Video, "video-1", "video-1", 4.0, true));
+        assert!(project.set_clip_transform(
+            "video-1",
+            VisualTransformState {
+                x: 120.0,
+                y: 180.0,
+                width: 840.0,
+                height: 1480.0,
+                opacity: 0.9,
+                rotation_degrees: 12.0,
+                z_index: 3,
+            }
+        ));
+
+        assert!(project.split_clip("video-1", 1.5));
+        let split_nodes = project.composition_nodes_at(0.75);
+        assert_eq!(split_nodes.len(), 1);
+        assert_eq!(split_nodes[0].clip_id, "video-1_a_1");
+        assert!((split_nodes[0].transform.x - 120.0).abs() < 0.001);
+        assert!((split_nodes[0].transform.rotation_degrees - 12.0).abs() < 0.001);
+
+        assert!(project.duplicate_clip("video-1_b_1"));
+        let duplicate_nodes = project.composition_nodes_at(4.25);
+        assert_eq!(duplicate_nodes.len(), 1);
+        assert!(duplicate_nodes[0].clip_id.contains("_copy_"));
+        assert!((duplicate_nodes[0].transform.x - 120.0).abs() < 0.001);
+        assert!((duplicate_nodes[0].transform.width - 840.0).abs() < 0.001);
     }
 
     #[test]

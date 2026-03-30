@@ -39,7 +39,7 @@ class AndroidMediaIo {
     ): Bitmap? =
         when (frameRequest.sourceKind) {
             "image" -> loadImageBitmap(frameRequest.sourcePath, targetWidth, targetHeight)
-            "video" -> loadVideoBitmap(
+            "video" -> loadVideoFrameBitmap(
                 path = frameRequest.sourcePath,
                 positionSeconds = frameRequest.sourcePositionSeconds ?: frameRequest.sourceStartSeconds,
                 targetWidth = targetWidth,
@@ -48,6 +48,59 @@ class AndroidMediaIo {
 
             else -> null
         }
+
+    fun loadTimelineBitmap(
+        path: String,
+        positionSeconds: Double,
+        targetWidth: Int,
+        targetHeight: Int,
+    ): Bitmap? =
+        loadVideoFrameBitmap(
+            path = path,
+            positionSeconds = positionSeconds,
+            targetWidth = targetWidth,
+            targetHeight = targetHeight,
+        )
+
+    fun loadTimelineBitmaps(
+        path: String,
+        timestampsSeconds: List<Double>,
+        targetWidth: Int,
+        targetHeight: Int,
+    ): List<Bitmap?> {
+        if (timestampsSeconds.isEmpty()) {
+            return emptyList()
+        }
+        val retriever = MediaMetadataRetriever()
+        return try {
+            retriever.setDataSource(path)
+            val rotationDegrees = inspectVideoStream(path)?.rotationDegrees ?: 0
+            val requestWidth =
+                if (rotationDegrees % 180 != 0) targetHeight else targetWidth
+            val requestHeight =
+                if (rotationDegrees % 180 != 0) targetWidth else targetHeight
+            timestampsSeconds.map { positionSeconds ->
+                val timeUs = max(0L, (positionSeconds * 1_000_000.0).roundToLong())
+                val decoded =
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+                        retriever.getScaledFrameAtTime(
+                            timeUs,
+                            MediaMetadataRetriever.OPTION_CLOSEST,
+                            requestWidth.coerceAtLeast(1),
+                            requestHeight.coerceAtLeast(1),
+                        )
+                    } else {
+                        retriever.getFrameAtTime(timeUs, MediaMetadataRetriever.OPTION_CLOSEST)
+                    }
+                decoded
+                    ?.let { rotateBitmap(it, rotationDegrees) }
+                    ?.let { scaleBitmapToFit(it, targetWidth, targetHeight) }
+                    ?.let(::normalizeBitmap)
+            }
+        } finally {
+            retriever.release()
+        }
+    }
 
     fun inspectVideoStream(path: String): VideoStreamDescriptor? {
         streamDescriptorCache[path]?.let { return it }
@@ -107,10 +160,10 @@ class AndroidMediaIo {
 
     private fun loadImageBitmap(path: String, targetWidth: Int, targetHeight: Int): Bitmap? {
         val decoded = BitmapFactory.decodeFile(path) ?: return null
-        return scaleBitmapToFit(decoded, targetWidth, targetHeight)
+        return normalizeBitmap(scaleBitmapToFit(decoded, targetWidth, targetHeight))
     }
 
-    private fun loadVideoBitmap(
+    private fun loadVideoFrameBitmap(
         path: String,
         positionSeconds: Double,
         targetWidth: Int,
@@ -139,6 +192,7 @@ class AndroidMediaIo {
             decoded
                 ?.let { rotateBitmap(it, rotationDegrees) }
                 ?.let { scaleBitmapToFit(it, targetWidth, targetHeight) }
+                ?.let(::normalizeBitmap)
         } finally {
             retriever.release()
         }
@@ -196,5 +250,16 @@ class AndroidMediaIo {
             bitmap.recycle()
         }
         return rotated
+    }
+
+    private fun normalizeBitmap(bitmap: Bitmap): Bitmap {
+        if (bitmap.config == Bitmap.Config.ARGB_8888) {
+            return bitmap
+        }
+        val normalized = bitmap.copy(Bitmap.Config.ARGB_8888, false)
+        if (normalized !== bitmap) {
+            bitmap.recycle()
+        }
+        return normalized
     }
 }

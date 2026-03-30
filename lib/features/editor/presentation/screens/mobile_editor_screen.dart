@@ -23,6 +23,7 @@ import '../widgets/editor_top_bar.dart';
 import '../widgets/media_bottom_sheet.dart';
 import '../widgets/media_dock.dart';
 import '../widgets/preview_stage.dart';
+import '../widgets/preview_transform_overlay.dart';
 import '../widgets/timeline_panel.dart';
 import '../widgets/visual_media_bottom_sheet.dart';
 
@@ -58,6 +59,11 @@ class _MobileEditorScreenState extends State<MobileEditorScreen> {
   Future<void>? _previewSceneSyncFuture;
   bool _isTogglingPlayback = false;
   double? _timelinePreviewSeconds;
+  final Map<String, EngineVisualTransformSnapshot> _optimisticClipTransforms =
+      <String, EngineVisualTransformSnapshot>{};
+  bool _isPreviewTransformGestureActive = false;
+  String? _previewTransformClipId;
+  EngineVisualTransformSnapshot? _previewTransformBeforeGesture;
 
   @override
   void initState() {
@@ -119,14 +125,57 @@ class _MobileEditorScreenState extends State<MobileEditorScreen> {
     );
   }
 
+  List<EngineCompositionNodeSnapshot> _applyTransformOverrides(
+    List<EngineCompositionNodeSnapshot> nodes,
+  ) {
+    if (_optimisticClipTransforms.isEmpty) {
+      return nodes;
+    }
+    return nodes.map((node) {
+      final override = _optimisticClipTransforms[node.clipId];
+      if (override == null) {
+        return node;
+      }
+      return EngineCompositionNodeSnapshot(
+        clipId: node.clipId,
+        assetId: node.assetId,
+        trackKind: node.trackKind,
+        assetUri: node.assetUri,
+        displayLabel: node.displayLabel,
+        clipStartSeconds: node.clipStartSeconds,
+        clipEndSeconds: node.clipEndSeconds,
+        clipDurationSeconds: node.clipDurationSeconds,
+        sourceStartSeconds: node.sourceStartSeconds,
+        sourceEndSeconds: node.sourceEndSeconds,
+        sourcePositionSeconds: node.sourcePositionSeconds,
+        transform: override,
+      );
+    }).toList(growable: false);
+  }
+
+  EngineCompositionNodeSnapshot? get _selectedPreviewTransformNode {
+    final selectedClipId = _engineController.selectedClipId;
+    if (selectedClipId == null) {
+      return null;
+    }
+    for (final node in _compositionNodes.reversed) {
+      if (node.clipId == selectedClipId &&
+          (node.trackKind == EngineTrackKind.video ||
+              node.trackKind == EngineTrackKind.image)) {
+        return node;
+      }
+    }
+    return null;
+  }
+
   Future<EngineCompositionNodeSnapshot?> _currentPreviewNode({
     double? projectSeconds,
   }) async {
     final seconds = projectSeconds ?? _effectiveCurrentSeconds;
     final nodes = await _engineController.compositionAt(seconds);
-    _compositionNodes = nodes;
+    _compositionNodes = _applyTransformOverrides(nodes);
     return EditorSceneMapper.resolveBasePreviewNode(
-      nodes,
+      _compositionNodes,
       isPlaying: _engineController.isPlaying,
       selectedClipId: _engineController.selectedClipId,
     );
@@ -323,6 +372,7 @@ class _MobileEditorScreenState extends State<MobileEditorScreen> {
       }
     }
     if (!_isApplyingTimelineEdit &&
+        !_isPreviewTransformGestureActive &&
         !_isTogglingPlayback &&
         _shouldRefreshPreviewScene()) {
       unawaited(_schedulePreviewSceneSync());
@@ -579,6 +629,9 @@ class _MobileEditorScreenState extends State<MobileEditorScreen> {
   }
 
   double? get _workspaceAspectRatio {
+    if (_engineController.projectWidth > 0 && _engineController.projectHeight > 0) {
+      return _engineController.projectWidth / _engineController.projectHeight;
+    }
     final size = _workspaceSize;
     if (size != null && size.height > 0) {
       return size.width / size.height;
@@ -701,7 +754,7 @@ class _MobileEditorScreenState extends State<MobileEditorScreen> {
       final nodes = await _engineController.compositionAt(
         _engineController.currentSeconds,
       );
-      _compositionNodes = nodes;
+      _compositionNodes = _applyTransformOverrides(nodes);
       EngineCompositionNodeSnapshot? node;
       for (final candidate in nodes) {
         if (candidate.clipId == clipId) {
@@ -974,6 +1027,97 @@ class _MobileEditorScreenState extends State<MobileEditorScreen> {
       baseAudioMuted: baseAudioNode?.isMuted ?? false,
       continuityKind: playback.continuityKind,
     );
+  }
+
+  Future<void> _pushPreviewSceneFromCurrentNodes() {
+    final baseNode = EditorSceneMapper.resolveBasePreviewNode(
+      _compositionNodes,
+      isPlaying: _engineController.isPlaying,
+      selectedClipId: _engineController.selectedClipId,
+    );
+    EngineAudioNodeSnapshot? baseAudioNode;
+    final baseClipId = baseNode?.clipId;
+    if (baseClipId != null) {
+      for (final node in _audioNodes) {
+        if (node.clipId == baseClipId &&
+            node.trackKind == EngineTrackKind.video) {
+          baseAudioNode = node;
+          break;
+        }
+      }
+    }
+    return _previewBackend.updateCompositionScene(
+      projectWidth: _engineController.projectWidth,
+      projectHeight: _engineController.projectHeight,
+      nodes: EditorSceneMapper.previewCompositionNodes(
+        _compositionNodes,
+        assetLabelResolver: (assetId) => _findAssetById(assetId)?.label,
+      ),
+      audioNodes: EditorSceneMapper.previewAudioNodes(_audioNodes),
+      baseClipId: baseClipId,
+      baseClipIds: baseClipId == null ? const <String>[] : <String>[baseClipId],
+      selectedClipId: _engineController.selectedClipId,
+      baseAudioGain: baseAudioNode?.gain ?? 1,
+      baseAudioMuted: baseAudioNode?.isMuted ?? false,
+    );
+  }
+
+  void _handlePreviewTransformGestureStart(
+    String clipId,
+    EngineVisualTransformSnapshot currentTransform,
+  ) {
+    _isPreviewTransformGestureActive = true;
+    _previewTransformClipId = clipId;
+    _previewTransformBeforeGesture = currentTransform;
+    _optimisticClipTransforms[clipId] = currentTransform;
+  }
+
+  void _handlePreviewTransformChanged(
+    String clipId,
+    EngineVisualTransformSnapshot transform,
+  ) {
+    if (_previewTransformClipId != clipId) {
+      return;
+    }
+    _optimisticClipTransforms[clipId] = transform;
+    _compositionNodes = _applyTransformOverrides(_compositionNodes);
+    unawaited(_pushPreviewSceneFromCurrentNodes());
+    if (mounted) {
+      setState(() {});
+    }
+  }
+
+  void _handlePreviewTransformCommitted(
+    String clipId,
+    EngineVisualTransformSnapshot transform,
+  ) {
+    final previousTransform = _previewTransformBeforeGesture;
+    _isPreviewTransformGestureActive = false;
+    _previewTransformClipId = null;
+    _previewTransformBeforeGesture = null;
+    _optimisticClipTransforms[clipId] = transform;
+    _compositionNodes = _applyTransformOverrides(_compositionNodes);
+    unawaited(() async {
+      try {
+        await _engineController.setClipTransform(clipId, transform);
+        await _schedulePreviewSceneSync();
+      } catch (error, stackTrace) {
+        debugPrint('Fusion Video: preview transform commit failed: $error');
+        debugPrintStack(stackTrace: stackTrace);
+        if (previousTransform != null) {
+          _optimisticClipTransforms[clipId] = previousTransform;
+          _compositionNodes = _applyTransformOverrides(_compositionNodes);
+          await _pushPreviewSceneFromCurrentNodes();
+        } else {
+          _optimisticClipTransforms.remove(clipId);
+        }
+      } finally {
+        _optimisticClipTransforms.remove(clipId);
+        if (mounted) {
+          setState(() {});
+        }
+      }
+    }());
   }
 
   Future<void> _openVisualMediaSheet({
@@ -1367,6 +1511,14 @@ class _MobileEditorScreenState extends State<MobileEditorScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final previewTransformNode = _selectedPreviewTransformNode;
+    final interactiveTransformNode =
+        _effectiveIsPlaying ? null : previewTransformNode;
+    final basePreviewNode = EditorSceneMapper.resolveBasePreviewNode(
+      _compositionNodes,
+      isPlaying: _engineController.isPlaying,
+      selectedClipId: _engineController.selectedClipId,
+    );
     return Scaffold(
       body: SafeArea(
         bottom: false,
@@ -1388,6 +1540,30 @@ class _MobileEditorScreenState extends State<MobileEditorScreen> {
                       child: RepaintBoundary(
                         child: PreviewStage(
                           workspaceAspectRatio: _workspaceAspectRatio,
+                          overlay: PreviewTransformOverlay(
+                            nodes: _compositionNodes,
+                            projectWidth: _engineController.projectWidth,
+                            projectHeight: _engineController.projectHeight,
+                            baseClipId: basePreviewNode?.clipId,
+                            selectedClipId: _engineController.selectedClipId,
+                            selectedNode: interactiveTransformNode,
+                            enabled: interactiveTransformNode != null,
+                            onTransformStart: () =>
+                                _handlePreviewTransformGestureStart(
+                              interactiveTransformNode!.clipId,
+                              interactiveTransformNode.transform,
+                            ),
+                            onTransformChanged: (transform) =>
+                                _handlePreviewTransformChanged(
+                              interactiveTransformNode!.clipId,
+                              transform,
+                            ),
+                            onTransformCommitted: (transform) =>
+                                _handlePreviewTransformCommitted(
+                              interactiveTransformNode!.clipId,
+                              transform,
+                            ),
+                          ),
                           child: _previewBackend.buildView(),
                         ),
                       ),

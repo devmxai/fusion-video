@@ -219,7 +219,10 @@ class NativePreviewBackend extends FusionPreviewBackend {
 
   @override
   Widget buildView({BoxFit fit = BoxFit.cover}) {
-    return FusionPreviewSurface(projectId: projectId);
+    return FusionPreviewSurface(
+      projectId: projectId,
+      useAndroidEngineSurface: false,
+    );
   }
 
   Future<void> _pushState() {

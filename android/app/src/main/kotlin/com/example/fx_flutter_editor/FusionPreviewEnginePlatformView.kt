@@ -2,6 +2,7 @@ package com.example.fx_flutter_editor
 
 import android.content.Context
 import android.graphics.Color
+import android.graphics.PixelFormat
 import android.os.SystemClock
 import android.view.Gravity
 import android.view.SurfaceHolder
@@ -9,12 +10,15 @@ import android.view.SurfaceView
 import android.view.View
 import android.widget.FrameLayout
 import com.example.fx_flutter_editor.previewengine.AndroidCodecVideoSession
+import com.example.fx_flutter_editor.previewengine.AudioClockDriftPlanner
 import com.example.fx_flutter_editor.previewengine.DecodedPreviewFrameResult
 import com.example.fx_flutter_editor.previewengine.FusionAndroidPreviewEngine
 import com.example.fx_flutter_editor.previewengine.PreviewContentLayout
+import com.example.fx_flutter_editor.previewengine.PreviewContentFitMode
 import com.example.fx_flutter_editor.previewengine.PreviewGlSurfaceView
 import com.example.fx_flutter_editor.previewengine.PreviewLayoutPlanner
 import com.example.fx_flutter_editor.previewengine.PreviewNodeLayout
+import com.example.fx_flutter_editor.previewengine.PlaybackContinuityPlanner
 import com.example.fx_flutter_editor.previewengine.ResolvedPreviewFrameRequest
 import io.flutter.plugin.common.StandardMessageCodec
 import io.flutter.plugin.platform.PlatformView
@@ -63,11 +67,19 @@ private class FusionEnginePreviewNativeView(
         }
     private val rendererView: PreviewGlSurfaceView = previewEngine.renderer.createView(context)
     private val videoSession = AndroidCodecVideoSession(this)
-    private var lastRenderedFrameToken: String? = null
+    private var lastRenderedRendererRequestKey: String? = null
     private var lastFrameRequest: ResolvedPreviewFrameRequest? = null
     private var lastPlayingFrameRequest: ResolvedPreviewFrameRequest? = null
+    private var pendingRendererHandoffRequestKey: String? = null
     private var activePlaybackSessionKey: String? = null
+    private var activeAudioSessionKey: String? = null
+    private var audioWasPlaying: Boolean = false
+    private var lastAudioSyncRealtimeMs: Long = 0L
+    private var lastVideoPlaybackStartRealtimeMs: Long = 0L
+    private var isCodecFrameReady: Boolean = false
     private var lastAppliedLayoutKey: String? = null
+    private var lastPlaybackWarmKey: String? = null
+    private var lastUpcomingWarmFrameToken: String? = null
     private var frameDropCount: Int = 0
     private var bufferUnderrunCount: Int = 0
     private var lastSeekLatencyMillis: Double = 0.0
@@ -76,12 +88,17 @@ private class FusionEnginePreviewNativeView(
     init {
         setBackgroundColor(Color.BLACK)
         videoSurfaceView.apply {
-            visibility = View.GONE
+            visibility = View.VISIBLE
+            setZOrderOnTop(false)
+            setZOrderMediaOverlay(false)
+            holder.setFormat(PixelFormat.OPAQUE)
             holder.addCallback(
                 object : SurfaceHolder.Callback {
                     override fun surfaceCreated(holder: SurfaceHolder) {
                         videoSession.attachSurface(holder.surface)
-                        lastPlayingFrameRequest?.let(videoSession::play)
+                        lastPlayingFrameRequest?.let {
+                            videoSession.play(it, playbackSessionKey(it))
+                        }
                     }
 
                     override fun surfaceChanged(
@@ -124,14 +141,22 @@ private class FusionEnginePreviewNativeView(
 
     override fun onFrameRequest(frameRequest: ResolvedPreviewFrameRequest?) {
         if (frameRequest == null) {
+            previewEngine.audioEngine.stop()
+            activeAudioSessionKey = null
+            audioWasPlaying = false
+            lastAudioSyncRealtimeMs = 0L
             lastFrameRequest = null
             lastPlayingFrameRequest = null
+            pendingRendererHandoffRequestKey = null
             activePlaybackSessionKey = null
+            isCodecFrameReady = false
             lastAppliedLayoutKey = null
+            lastPlaybackWarmKey = null
+            lastUpcomingWarmFrameToken = null
+            lastVideoPlaybackStartRealtimeMs = 0L
             videoSession.stopPlayback()
-            videoContainer.visibility = View.GONE
-            rendererContainer.visibility = View.VISIBLE
-            lastRenderedFrameToken = null
+            showRendererOnly()
+            lastRenderedRendererRequestKey = null
             rendererView.clearFrame()
             reportRuntimeState(
                 frameRequest = null,
@@ -144,36 +169,163 @@ private class FusionEnginePreviewNativeView(
         }
 
         lastFrameRequest = frameRequest
+        syncAudio(frameRequest)
         if (frameRequest.sourceKind == "video" && frameRequest.isPlaying) {
+            pendingRendererHandoffRequestKey = null
             val nextPlaybackSessionKey = playbackSessionKey(frameRequest)
+            val nowRealtimeMs = SystemClock.elapsedRealtime()
             val isSamePlaybackSession = nextPlaybackSessionKey == activePlaybackSessionKey
+            val previousPlayingFrameRequest = lastPlayingFrameRequest
+            val targetSourcePositionSeconds =
+                frameRequest.sourcePositionSeconds ?: frameRequest.sourceStartSeconds
+            val canResumePlayback =
+                videoSession.canResume(
+                    sessionKey = nextPlaybackSessionKey,
+                    targetSourcePositionSeconds = targetSourcePositionSeconds,
+                )
+            val isPausedPlaybackSession =
+                videoSession.isPausedForSession(nextPlaybackSessionKey)
+            val shouldRetargetPlayback =
+                isSamePlaybackSession &&
+                    !isPausedPlaybackSession &&
+                    videoSession.shouldRetargetPlayback(
+                        sessionKey = nextPlaybackSessionKey,
+                        continuityKind = frameRequest.continuityKind,
+                        targetSourcePositionSeconds = targetSourcePositionSeconds,
+                    )
+            val canBypassSteadyPlaybackTick =
+                isSamePlaybackSession &&
+                    !canResumePlayback &&
+                    !isPausedPlaybackSession &&
+                    !shouldRetargetPlayback &&
+                    isCodecFrameReady &&
+                    previousPlayingFrameRequest != null &&
+                    sameSteadyPlaybackWindow(
+                        previous = previousPlayingFrameRequest,
+                        current = frameRequest,
+                    )
+            val isWaitingForFirstCodecFrame =
+                isSamePlaybackSession &&
+                    !isCodecFrameReady &&
+                    !canResumePlayback &&
+                    !isPausedPlaybackSession &&
+                    !shouldRetargetPlayback &&
+                    lastVideoPlaybackStartRealtimeMs > 0L &&
+                    nowRealtimeMs - lastVideoPlaybackStartRealtimeMs < VIDEO_STARTUP_GRACE_MS
             lastPlayingFrameRequest = frameRequest
+            if (canBypassSteadyPlaybackTick) {
+                showVideoOnly()
+                prewarmUpcomingSourceFrame(frameRequest)
+                return
+            }
+            if (isWaitingForFirstCodecFrame) {
+                showRendererOnly()
+                prewarmUpcomingSourceFrame(frameRequest)
+                return
+            }
             updateBaseVisualLayout(frameRequest)
-            videoContainer.visibility = View.VISIBLE
-            rendererContainer.visibility = View.GONE
             if (!isSamePlaybackSession) {
                 activePlaybackSessionKey = nextPlaybackSessionKey
-                videoSession.play(frameRequest)
+                isCodecFrameReady = false
+                lastVideoPlaybackStartRealtimeMs = nowRealtimeMs
+                showRendererOnly()
+                warmCurrentPlaybackFrame(frameRequest)
+                videoSession.play(frameRequest, nextPlaybackSessionKey)
                 reportRuntimeState(
                     frameRequest = frameRequest,
                     isBuffering = true,
-                    frameReady = true,
+                    frameReady = lastRenderedRendererRequestKey != null,
                     previewLatencyMillis = 0.0,
                     seekLatencyMillis = lastSeekLatencyMillis,
                     force = true,
                 )
+            } else if (canResumePlayback) {
+                videoSession.resumePlayback()
+                if (isCodecFrameReady) {
+                    showVideoOnly()
+                } else {
+                    showRendererOnly()
+                    warmCurrentPlaybackFrame(frameRequest)
+                }
+                reportRuntimeState(
+                    frameRequest = frameRequest,
+                    isBuffering = !isCodecFrameReady,
+                    frameReady = isCodecFrameReady || lastRenderedRendererRequestKey != null,
+                    previewLatencyMillis = 0.0,
+                    seekLatencyMillis = lastSeekLatencyMillis,
+                    force = true,
+                )
+            } else if (isPausedPlaybackSession) {
+                isCodecFrameReady = false
+                lastVideoPlaybackStartRealtimeMs = nowRealtimeMs
+                showRendererOnly()
+                warmCurrentPlaybackFrame(frameRequest)
+                videoSession.play(frameRequest, nextPlaybackSessionKey)
+                reportRuntimeState(
+                    frameRequest = frameRequest,
+                    isBuffering = true,
+                    frameReady = lastRenderedRendererRequestKey != null,
+                    previewLatencyMillis = 0.0,
+                    seekLatencyMillis = lastSeekLatencyMillis,
+                    force = true,
+                )
+            } else if (shouldRetargetPlayback) {
+                isCodecFrameReady = false
+                lastVideoPlaybackStartRealtimeMs = nowRealtimeMs
+                showRendererOnly()
+                warmCurrentPlaybackFrame(frameRequest)
+                videoSession.play(frameRequest, nextPlaybackSessionKey)
+                reportRuntimeState(
+                    frameRequest = frameRequest,
+                    isBuffering = true,
+                    frameReady = lastRenderedRendererRequestKey != null,
+                    previewLatencyMillis = 0.0,
+                    seekLatencyMillis = lastSeekLatencyMillis,
+                    force = true,
+                )
+            } else if (isCodecFrameReady) {
+                showVideoOnly()
+            } else {
+                showRendererOnly()
             }
+            prewarmUpcomingSourceFrame(frameRequest)
             return
         }
 
         lastPlayingFrameRequest = null
-        activePlaybackSessionKey = null
-        videoSession.stopPlayback()
-        videoContainer.visibility = View.GONE
-        rendererContainer.visibility = View.VISIBLE
+        val pausedPlaybackSessionKey =
+            if (frameRequest.sourceKind == "video") {
+                playbackSessionKey(frameRequest)
+            } else {
+                null
+            }
+        val shouldKeepPausedPlaybackSession =
+            pausedPlaybackSessionKey != null &&
+                activePlaybackSessionKey == pausedPlaybackSessionKey
+        val shouldHoldVideoUntilRendererReady =
+            videoContainer.visibility == View.VISIBLE &&
+                frameRequest.sourceKind == "video" &&
+                frameRequest.frameToken.isNotBlank()
+        isCodecFrameReady = false
+        if (shouldKeepPausedPlaybackSession) {
+            activePlaybackSessionKey = pausedPlaybackSessionKey
+            videoSession.pausePlayback()
+        } else {
+            activePlaybackSessionKey = null
+            videoSession.stopPlayback()
+        }
+        if (shouldHoldVideoUntilRendererReady) {
+            pendingRendererHandoffRequestKey = rendererRequestKey(frameRequest)
+            holdVideoUntilRendererReady()
+        } else {
+            pendingRendererHandoffRequestKey = null
+            showRendererOnly()
+        }
         updateBaseVisualLayout(frameRequest)
 
-        if (frameRequest.frameToken == lastRenderedFrameToken) {
+        if (rendererRequestKey(frameRequest) == lastRenderedRendererRequestKey) {
+            pendingRendererHandoffRequestKey = null
+            showRendererOnly()
             reportRuntimeState(
                 frameRequest = frameRequest,
                 isBuffering = false,
@@ -185,10 +337,18 @@ private class FusionEnginePreviewNativeView(
         }
 
         bufferUnderrunCount += 1
+        if (
+            frameRequest.transportKind == "seek" ||
+                frameRequest.transportKind == "scrubBegin" ||
+                frameRequest.transportKind == "scrubUpdate" ||
+                frameRequest.transportKind == "scrubEnd"
+        ) {
+            previewEngine.decodeScheduler.cancelProjectPrefetch(projectId)
+        }
         reportRuntimeState(
             frameRequest = frameRequest,
             isBuffering = true,
-            frameReady = lastRenderedFrameToken != null,
+            frameReady = lastRenderedRendererRequestKey != null,
             previewLatencyMillis = 0.0,
             seekLatencyMillis = lastSeekLatencyMillis,
         )
@@ -205,9 +365,34 @@ private class FusionEnginePreviewNativeView(
         )
     }
 
+    private fun showRendererOnly() {
+        setVisibility(videoContainer, View.GONE)
+        setVisibility(rendererContainer, View.VISIBLE)
+    }
+
+    private fun showVideoOnly() {
+        setVisibility(videoContainer, View.VISIBLE)
+        setVisibility(rendererContainer, View.GONE)
+    }
+
+    private fun holdVideoUntilRendererReady() {
+        setVisibility(videoContainer, View.VISIBLE)
+        setVisibility(rendererContainer, View.GONE)
+    }
+
+    private fun setVisibility(
+        view: View,
+        visibility: Int,
+    ) {
+        if (view.visibility != visibility) {
+            view.visibility = visibility
+        }
+    }
+
     fun dispose() {
         previewEngine.detachOutput(projectId, this)
         previewEngine.decodeScheduler.cancelProject(projectId)
+        previewEngine.audioEngine.stop()
         videoSession.dispose()
         rendererView.dispose()
     }
@@ -243,7 +428,8 @@ private class FusionEnginePreviewNativeView(
         if (!result.frameRequest.isPlaying) {
             lastSeekLatencyMillis = result.previewLatencyMillis
         }
-        lastRenderedFrameToken = result.frameRequest.frameToken
+        val requestKey = rendererRequestKey(result.frameRequest)
+        lastRenderedRendererRequestKey = requestKey
         val descriptor = previewEngine.mediaIo.inspectVideoStream(result.frameRequest.sourcePath)
         rendererView.submitFrame(
             bitmap = result.bitmap,
@@ -255,7 +441,12 @@ private class FusionEnginePreviewNativeView(
                 descriptor?.displayHeight
                     ?: result.bitmap?.height
                     ?: resolveTargetHeight(result.frameRequest),
+            fitMode = resolveContentFitMode(result.frameRequest),
         )
+        if (pendingRendererHandoffRequestKey == requestKey) {
+            pendingRendererHandoffRequestKey = null
+            showRendererOnly()
+        }
         reportRuntimeState(
             frameRequest = result.frameRequest,
             isBuffering = false,
@@ -264,6 +455,81 @@ private class FusionEnginePreviewNativeView(
             seekLatencyMillis = lastSeekLatencyMillis,
             force = !result.frameRequest.isPlaying,
         )
+    }
+
+    private fun warmCurrentPlaybackFrame(frameRequest: ResolvedPreviewFrameRequest) {
+        val warmKey = playbackWarmKey(frameRequest)
+        if (lastPlaybackWarmKey == warmKey) {
+            return
+        }
+        lastPlaybackWarmKey = warmKey
+        previewEngine.decodeScheduler.requestFrame(
+            mediaIo = previewEngine.mediaIo,
+            frameRequest = frameRequest.copy(isPlaying = false),
+            targetWidth = resolveTargetWidth(frameRequest),
+            targetHeight = resolveTargetHeight(frameRequest),
+            onFrameDecoded = ::handleDecodedFrame,
+        )
+    }
+
+    private fun prewarmUpcomingSourceFrame(frameRequest: ResolvedPreviewFrameRequest) {
+        if (
+            frameRequest.continuityKind != "differentSource" &&
+                frameRequest.continuityKind != "videoToImage"
+        ) {
+            return
+        }
+        val upcomingFrameRequest = previewEngine.upcomingWarmupFrameRequestForProject(projectId) ?: return
+        if (lastUpcomingWarmFrameToken == upcomingFrameRequest.frameToken) {
+            return
+        }
+        lastUpcomingWarmFrameToken = upcomingFrameRequest.frameToken
+        previewEngine.decodeScheduler.prefetchFrame(
+            mediaIo = previewEngine.mediaIo,
+            frameRequest = upcomingFrameRequest,
+            targetWidth = resolveTargetWidth(frameRequest),
+            targetHeight = resolveTargetHeight(frameRequest),
+        )
+    }
+
+    private fun playbackWarmKey(frameRequest: ResolvedPreviewFrameRequest): String {
+        return if (frameRequest.isPlaying) {
+            val playbackSessionKey = playbackSessionKey(frameRequest)
+            "play:$playbackSessionKey:${frameRequest.transportRevision}"
+        } else {
+            "still:${frameRequest.frameToken}"
+        }
+    }
+
+    private fun rendererRequestKey(frameRequest: ResolvedPreviewFrameRequest): String {
+        return buildString {
+            append(frameRequest.frameToken)
+            append('|')
+            append(frameRequest.transportRevision)
+            append('|')
+            append(frameRequest.transportKind ?: "unknown")
+            append('|')
+            append(frameRequest.projectWidth ?: 0)
+            append('x')
+            append(frameRequest.projectHeight ?: 0)
+        }
+    }
+
+    private fun sameSteadyPlaybackWindow(
+        previous: ResolvedPreviewFrameRequest,
+        current: ResolvedPreviewFrameRequest,
+    ): Boolean {
+        return previous.sourceId == current.sourceId &&
+            previous.sourcePath == current.sourcePath &&
+            previous.sourceKind == current.sourceKind &&
+            previous.continuityKind == current.continuityKind &&
+            previous.clipStartSeconds == current.clipStartSeconds &&
+            previous.clipEndSeconds == current.clipEndSeconds &&
+            previous.sourceStartSeconds == current.sourceStartSeconds &&
+            previous.sourceEndSeconds == current.sourceEndSeconds &&
+            previous.projectWidth == current.projectWidth &&
+            previous.projectHeight == current.projectHeight &&
+            previous.transportRevision == current.transportRevision
     }
 
     private fun updateBaseVisualLayout(
@@ -291,9 +557,10 @@ private class FusionEnginePreviewNativeView(
             PreviewLayoutPlanner.resolveContentLayout(
                 containerWidth = nodeLayout.width,
                 containerHeight = nodeLayout.height,
-                mediaWidth = descriptor?.width ?: descriptor?.displayWidth,
-                mediaHeight = descriptor?.height ?: descriptor?.displayHeight,
+                mediaWidth = descriptor?.displayWidth ?: descriptor?.width,
+                mediaHeight = descriptor?.displayHeight ?: descriptor?.height,
                 mediaRotationDegrees = descriptor?.rotationDegrees ?: 0,
+                fitMode = resolveContentFitMode(frameRequest, sceneNode, projectWidth, projectHeight),
             )
         val layoutKey =
             buildString {
@@ -306,6 +573,8 @@ private class FusionEnginePreviewNativeView(
                 append(nodeLayout.height)
                 append('|')
                 append(nodeLayout.rotationDegrees)
+                append('|')
+                append(nodeLayout.opacity)
                 append('|')
                 append(videoContentLayout.left)
                 append('|')
@@ -341,6 +610,7 @@ private class FusionEnginePreviewNativeView(
         view.pivotX = layout.width / 2f
         view.pivotY = layout.height / 2f
         view.rotation = layout.rotationDegrees
+        view.alpha = layout.opacity
         view.requestLayout()
     }
 
@@ -374,10 +644,13 @@ private class FusionEnginePreviewNativeView(
     }
 
     override fun onCodecBufferingChanged(isBuffering: Boolean) {
+        if (isBuffering && !isCodecFrameReady) {
+            showRendererOnly()
+        }
         reportRuntimeState(
             frameRequest = lastPlayingFrameRequest,
             isBuffering = isBuffering,
-            frameReady = true,
+            frameReady = isCodecFrameReady || lastRenderedRendererRequestKey != null,
             previewLatencyMillis = 0.0,
             seekLatencyMillis = lastSeekLatencyMillis,
             force = isBuffering,
@@ -386,9 +659,18 @@ private class FusionEnginePreviewNativeView(
 
     override fun onCodecFrameRendered(sourcePositionSeconds: Double) {
         val frameRequest = lastPlayingFrameRequest ?: return
+        isCodecFrameReady = true
+        lastVideoPlaybackStartRealtimeMs = 0L
+        showVideoOnly()
         val clipLocalSeconds = sourcePositionSeconds - frameRequest.sourceStartSeconds
         val timelinePositionSeconds =
             (frameRequest.clipStartSeconds + clipLocalSeconds).coerceAtLeast(0.0)
+        previewEngine.syncRenderedTimelinePosition(
+            projectId = projectId,
+            timelinePositionSeconds = timelinePositionSeconds,
+            isPlaying = true,
+        )
+        syncAudioToRenderedPosition()
         reportRuntimeState(
             frameRequest =
                 frameRequest.copy(
@@ -405,9 +687,15 @@ private class FusionEnginePreviewNativeView(
 
     override fun onCodecPlaybackCompleted(sourcePositionSeconds: Double) {
         val frameRequest = lastPlayingFrameRequest ?: return
+        isCodecFrameReady = false
         val clipLocalSeconds = sourcePositionSeconds - frameRequest.sourceStartSeconds
         val timelinePositionSeconds =
             (frameRequest.clipStartSeconds + clipLocalSeconds).coerceAtLeast(0.0)
+        previewEngine.syncRenderedTimelinePosition(
+            projectId = projectId,
+            timelinePositionSeconds = timelinePositionSeconds,
+            isPlaying = false,
+        )
         reportRuntimeState(
             frameRequest =
                 frameRequest.copy(
@@ -422,6 +710,7 @@ private class FusionEnginePreviewNativeView(
             force = true,
         )
         activePlaybackSessionKey = null
+        lastVideoPlaybackStartRealtimeMs = 0L
     }
 
     private fun reportRuntimeState(
@@ -448,7 +737,7 @@ private class FusionEnginePreviewNativeView(
                     isBuffering = isBuffering,
                     frameReady = frameReady,
                     frameDropCount = frameDropCount.coerceAtLeast(0),
-                    audioDropCount = 0,
+                    audioDropCount = previewEngine.audioEngine.runtimeSnapshot.dropCount,
                     bufferUnderrunCount = bufferUnderrunCount.coerceAtLeast(0),
                     previewLatencyMillis = previewLatencyMillis,
                     seekLatencyMillis = seekLatencyMillis,
@@ -457,14 +746,84 @@ private class FusionEnginePreviewNativeView(
     }
 
     private fun playbackSessionKey(frameRequest: ResolvedPreviewFrameRequest): String {
-        return buildString {
-            append(frameRequest.sourcePath)
-            append('|')
-            append(frameRequest.sourceStartSeconds)
-            append('|')
-            append(frameRequest.sourceEndSeconds ?: -1.0)
-            append('|')
-            append(frameRequest.transportRevision)
+        return PlaybackContinuityPlanner.buildPlaybackSessionKey(frameRequest)
+    }
+
+    private fun resolveContentFitMode(
+        frameRequest: ResolvedPreviewFrameRequest,
+        sceneNode: Map<String, Any?>? = previewEngine.sceneNodeForClip(projectId, frameRequest.sourceId),
+        projectWidth: Int = frameRequest.projectWidth ?: width,
+        projectHeight: Int = frameRequest.projectHeight ?: height,
+    ): PreviewContentFitMode {
+        if (frameRequest.sourceKind != "video" && frameRequest.sourceKind != "image") {
+            return PreviewContentFitMode.CONTAIN
         }
+        if (projectWidth <= 0 || projectHeight <= 0) {
+            return PreviewContentFitMode.CONTAIN
+        }
+        if (sceneNode == null) {
+            return PreviewContentFitMode.COVER
+        }
+        val nodeX = (sceneNode["x"] as? Number)?.toDouble() ?: 0.0
+        val nodeY = (sceneNode["y"] as? Number)?.toDouble() ?: 0.0
+        val nodeWidth = (sceneNode["width"] as? Number)?.toDouble() ?: projectWidth.toDouble()
+        val nodeHeight = (sceneNode["height"] as? Number)?.toDouble() ?: projectHeight.toDouble()
+        val fillsProject =
+            nodeX <= LAYOUT_EPSILON &&
+                nodeY <= LAYOUT_EPSILON &&
+                kotlin.math.abs(nodeWidth - projectWidth.toDouble()) <= LAYOUT_EPSILON &&
+                kotlin.math.abs(nodeHeight - projectHeight.toDouble()) <= LAYOUT_EPSILON
+        return if (fillsProject) {
+            PreviewContentFitMode.COVER
+        } else {
+            PreviewContentFitMode.CONTAIN
+        }
+    }
+
+    private companion object {
+        private const val LAYOUT_EPSILON = 1.0
+        private const val VIDEO_STARTUP_GRACE_MS = 420L
+    }
+
+    private fun syncAudio(frameRequest: ResolvedPreviewFrameRequest) {
+        val audioRequest = previewEngine.audioRequestForProject(projectId)
+        if (audioRequest == null) {
+            previewEngine.audioEngine.stop()
+            activeAudioSessionKey = null
+            audioWasPlaying = false
+            lastAudioSyncRealtimeMs = 0L
+            return
+        }
+        if (frameRequest.isPlaying) {
+            if (activeAudioSessionKey != audioRequest.sessionKey || !audioWasPlaying) {
+                previewEngine.audioEngine.play(audioRequest)
+                activeAudioSessionKey = audioRequest.sessionKey
+                audioWasPlaying = true
+                lastAudioSyncRealtimeMs = 0L
+            }
+        } else {
+            previewEngine.audioEngine.pause(audioRequest)
+            activeAudioSessionKey = audioRequest.sessionKey
+            audioWasPlaying = false
+            lastAudioSyncRealtimeMs = 0L
+        }
+    }
+
+    private fun syncAudioToRenderedPosition() {
+        val audioRequest = previewEngine.audioRequestForProject(projectId) ?: return
+        if (activeAudioSessionKey != audioRequest.sessionKey || !audioWasPlaying) {
+            return
+        }
+        val nowRealtimeMs = SystemClock.elapsedRealtime()
+        if (
+            !AudioClockDriftPlanner.shouldSyncFromRenderedFrame(
+                lastSyncRealtimeMs = lastAudioSyncRealtimeMs,
+                nowRealtimeMs = nowRealtimeMs,
+            )
+        ) {
+            return
+        }
+        lastAudioSyncRealtimeMs = nowRealtimeMs
+        previewEngine.audioEngine.syncPlayback(audioRequest)
     }
 }

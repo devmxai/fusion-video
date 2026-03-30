@@ -227,6 +227,67 @@ void main() {
     controller.dispose();
   });
 
+  test('clip transform persists through split and duplicate snapshots',
+      () async {
+    final controller = buildController();
+
+    await controller.initialize();
+    await controller.importAsset(
+      const EngineAssetDescriptor(
+        id: 'video-1',
+        uri: '/tmp/video-1.mp4',
+        kind: EngineTrackKind.video,
+        durationSeconds: 4.0,
+      ),
+    );
+    await controller.insertClip(
+      trackKind: EngineTrackKind.video,
+      clipId: 'video-1',
+      assetId: 'video-1',
+      durationSeconds: 4.0,
+    );
+
+    await controller.setClipTransform(
+      'video-1',
+      const EngineVisualTransformSnapshot(
+        x: 120,
+        y: 240,
+        width: 840,
+        height: 1440,
+        opacity: 0.9,
+        rotationDegrees: 10,
+        zIndex: 3,
+      ),
+    );
+    await controller.seekSeconds(1.5);
+    await settleEngine();
+    await controller.splitSelectedClip();
+
+    var node = await controller.compositionNodeForClipId(
+      'video-1_b_1',
+      projectSeconds: 2.0,
+    );
+    expect(node, isNotNull);
+    expect(node!.transform.x, closeTo(120, 0.001));
+    expect(node.transform.rotationDegrees, closeTo(10, 0.001));
+
+    controller.selectClip('video-1_b_1');
+    await controller.duplicateSelectedClip();
+    final duplicatedId = controller.selectedClipId;
+    expect(duplicatedId, contains('_copy_'));
+
+    node = await controller.compositionNodeForClipId(
+      duplicatedId!,
+      projectSeconds: 4.25,
+    );
+    expect(node, isNotNull);
+    expect(node!.transform.width, closeTo(840, 0.001));
+    expect(node.transform.height, closeTo(1440, 0.001));
+
+    await controller.shutdown();
+    controller.dispose();
+  });
+
   test('reorder moves a clip to the previewed insertion slot cleanly',
       () async {
     final controller = buildController();

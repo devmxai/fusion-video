@@ -654,6 +654,24 @@ class FusionVideoEngineSessionController extends ChangeNotifier {
     notifyListeners();
   }
 
+  Future<void> setClipTransform(
+    String clipId,
+    EngineVisualTransformSnapshot transform,
+  ) async {
+    final handle = _projectHandle;
+    if (handle == null) {
+      return;
+    }
+
+    final result = _findClip(clipId);
+    if (result == null || result.clip.type != TimelineClipType.media) {
+      return;
+    }
+
+    await _bridge.setClipTransform(handle, clipId, transform);
+    notifyListeners();
+  }
+
   Future<void> insertClip({
     required EngineTrackKind trackKind,
     required String clipId,

@@ -1,3 +1,5 @@
+import 'package:flutter/foundation.dart';
+
 class PreviewFeatureFlags {
   const PreviewFeatureFlags._();
 
@@ -6,8 +8,13 @@ class PreviewFeatureFlags {
     defaultValue: true,
   );
 
-  static const bool useAndroidEngineSurface = bool.fromEnvironment(
-    'FUSION_USE_ANDROID_ENGINE_SURFACE',
+  static const bool _legacyAndroidPreviewSurfaceOverride = bool.fromEnvironment(
+    'FUSION_USE_LEGACY_ANDROID_PREVIEW_SURFACE',
     defaultValue: false,
   );
+
+  static bool get useLegacyAndroidPreviewSurface =>
+      !kReleaseMode && _legacyAndroidPreviewSurfaceOverride;
+
+  static bool get useAndroidEngineSurface => !useLegacyAndroidPreviewSurface;
 }

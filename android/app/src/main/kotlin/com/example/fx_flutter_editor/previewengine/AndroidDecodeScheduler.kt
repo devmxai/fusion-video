@@ -7,6 +7,7 @@ import android.os.SystemClock
 import java.util.LinkedHashMap
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import kotlin.math.max
 import kotlin.math.roundToInt
 
 data class DecodedPreviewFrameResult(
@@ -19,15 +20,18 @@ data class DecodedPreviewFrameResult(
 )
 
 class AndroidDecodeScheduler(
-    private val executor: ExecutorService = Executors.newSingleThreadExecutor(),
+    private val executor: ExecutorService = Executors.newFixedThreadPool(2),
+    private val prefetchExecutor: ExecutorService = Executors.newSingleThreadExecutor(),
     private val mainHandler: Handler = Handler(Looper.getMainLooper()),
 ) {
     private val lock = Any()
     private val latestSequenceByProject = mutableMapOf<Int, Long>()
+    private val prefetchGenerationByProject = mutableMapOf<Int, Long>()
+    private val pendingPrefetchKeys = mutableSetOf<String>()
     private val frameCache =
-        object : LinkedHashMap<String, Bitmap>(12, 0.75f, true) {
+        object : LinkedHashMap<String, Bitmap>(24, 0.75f, true) {
             override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Bitmap>?): Boolean {
-                return size > 12
+                return size > 24
             }
         }
 
@@ -62,13 +66,27 @@ class AndroidDecodeScheduler(
                     droppedFrameCount = 0,
                 ),
             )
-            if (frameRequest.isPlaying) {
-                prefetchAdjacentFrames(mediaIo, frameRequest, targetWidth, targetHeight)
-            }
+            prefetchContextFrames(mediaIo, frameRequest, targetWidth, targetHeight)
             return
         }
 
         executor.execute {
+            if (shouldDropBeforeDecode(frameRequest.projectId, sequence)) {
+                mainHandler.post {
+                    onFrameDecoded(
+                        DecodedPreviewFrameResult(
+                            frameRequest = frameRequest,
+                            bitmap = null,
+                            cacheHit = false,
+                            isStale = true,
+                            previewLatencyMillis =
+                                (SystemClock.elapsedRealtime() - startedRealtimeMs).toDouble(),
+                            droppedFrameCount = 1,
+                        ),
+                    )
+                }
+                return@execute
+            }
             val decodedBitmap =
                 mediaIo.loadPreviewBitmap(
                     frameRequest = frameRequest,
@@ -84,9 +102,7 @@ class AndroidDecodeScheduler(
                 synchronized(lock) {
                     latestSequenceByProject[frameRequest.projectId] != sequence
                 }
-            if (frameRequest.isPlaying) {
-                prefetchAdjacentFrames(mediaIo, frameRequest, targetWidth, targetHeight)
-            }
+            prefetchContextFrames(mediaIo, frameRequest, targetWidth, targetHeight)
             mainHandler.post {
                 onFrameDecoded(
                     DecodedPreviewFrameResult(
@@ -106,12 +122,65 @@ class AndroidDecodeScheduler(
     fun cancelProject(projectId: Int) {
         synchronized(lock) {
             latestSequenceByProject.remove(projectId)
+            prefetchGenerationByProject.remove(projectId)
+        }
+    }
+
+    fun cancelProjectPrefetch(projectId: Int) {
+        synchronized(lock) {
+            prefetchGenerationByProject[projectId] =
+                (prefetchGenerationByProject[projectId] ?: 0L) + 1L
+        }
+    }
+
+    fun prefetchFrame(
+        mediaIo: AndroidMediaIo,
+        frameRequest: ResolvedPreviewFrameRequest,
+        targetWidth: Int,
+        targetHeight: Int,
+    ) {
+        val cacheKey = cacheKey(frameRequest, targetWidth, targetHeight)
+        synchronized(lock) {
+            if (frameCache.containsKey(cacheKey) || pendingPrefetchKeys.contains(cacheKey)) {
+                return
+            }
+            pendingPrefetchKeys.add(cacheKey)
+        }
+        val prefetchGeneration =
+            synchronized(lock) {
+                prefetchGenerationByProject[frameRequest.projectId] ?: 0L
+            }
+
+        prefetchExecutor.execute {
+            try {
+                if (isPrefetchCancelled(frameRequest.projectId, prefetchGeneration)) {
+                    return@execute
+                }
+                val bitmap =
+                    mediaIo.loadPreviewBitmap(
+                        frameRequest = frameRequest,
+                        targetWidth = targetWidth,
+                        targetHeight = targetHeight,
+                    ) ?: return@execute
+                if (isPrefetchCancelled(frameRequest.projectId, prefetchGeneration)) {
+                    return@execute
+                }
+                synchronized(lock) {
+                    frameCache[cacheKey] = bitmap
+                }
+            } finally {
+                synchronized(lock) {
+                    pendingPrefetchKeys.remove(cacheKey)
+                }
+            }
         }
     }
 
     fun reset() {
         synchronized(lock) {
             latestSequenceByProject.clear()
+            prefetchGenerationByProject.clear()
+            pendingPrefetchKeys.clear()
             frameCache.clear()
         }
     }
@@ -128,41 +197,97 @@ class AndroidDecodeScheduler(
         val sourcePositionSeconds = frameRequest.sourcePositionSeconds ?: return
         val frameStepSeconds =
             mediaIo.inspectVideoStream(frameRequest.sourcePath)?.frameStepSeconds ?: (1.0 / 30.0)
-        for (offset in 1..2) {
-            val nextSourcePositionSeconds = sourcePositionSeconds + (frameStepSeconds * offset)
+        val offsets =
+            if (frameRequest.isPlaying) {
+                listOf(1, 2)
+            } else {
+                listOf(-1, 1)
+            }
+        for (offset in offsets) {
+            val candidateSourcePositionSeconds =
+                sourcePositionSeconds + (frameStepSeconds * offset.toDouble())
+            if (candidateSourcePositionSeconds < frameRequest.sourceStartSeconds - 0.0001) {
+                continue
+            }
             if (
                 frameRequest.sourceEndSeconds != null &&
-                nextSourcePositionSeconds > frameRequest.sourceEndSeconds + 0.0001
+                candidateSourcePositionSeconds > frameRequest.sourceEndSeconds + 0.0001
             ) {
-                break
+                continue
             }
-            val nextFrameRequest =
+            val candidateTimelinePositionSeconds =
+                if (offset < 0) {
+                    max(
+                        frameRequest.clipStartSeconds,
+                        frameRequest.timelinePositionSeconds + (frameStepSeconds * offset.toDouble()),
+                    )
+                } else {
+                    frameRequest.timelinePositionSeconds + (frameStepSeconds * offset.toDouble())
+                }
+            val adjacentFrameRequest =
                 frameRequest.copy(
-                    timelinePositionSeconds =
-                        frameRequest.timelinePositionSeconds + (frameStepSeconds * offset),
-                    sourcePositionSeconds = nextSourcePositionSeconds,
+                    timelinePositionSeconds = candidateTimelinePositionSeconds,
+                    sourcePositionSeconds = candidateSourcePositionSeconds,
                     frameToken =
-                        "video:${frameRequest.sourcePath}:${(nextSourcePositionSeconds * 1000.0).roundToInt()}",
+                        "video:${frameRequest.sourcePath}:${(candidateSourcePositionSeconds * 1000.0).roundToInt()}",
                 )
-            val nextCacheKey = cacheKey(nextFrameRequest, targetWidth, targetHeight)
+            val adjacentCacheKey = cacheKey(adjacentFrameRequest, targetWidth, targetHeight)
             val isAlreadyCached =
                 synchronized(lock) {
-                    frameCache.containsKey(nextCacheKey)
+                    frameCache.containsKey(adjacentCacheKey) ||
+                        pendingPrefetchKeys.contains(adjacentCacheKey)
                 }
             if (isAlreadyCached) {
                 continue
             }
-            val prefetchedBitmap =
-                mediaIo.loadPreviewBitmap(
-                    frameRequest = nextFrameRequest,
-                    targetWidth = targetWidth,
-                    targetHeight = targetHeight,
-                )
-            if (prefetchedBitmap != null) {
-                synchronized(lock) {
-                    frameCache[nextCacheKey] = prefetchedBitmap
-                }
-            }
+            prefetchFrame(
+                mediaIo = mediaIo,
+                frameRequest = adjacentFrameRequest,
+                targetWidth = targetWidth,
+                targetHeight = targetHeight,
+            )
+        }
+    }
+
+    private fun prefetchContextFrames(
+        mediaIo: AndroidMediaIo,
+        frameRequest: ResolvedPreviewFrameRequest,
+        targetWidth: Int,
+        targetHeight: Int,
+    ) {
+        if (!shouldPrefetchContext(frameRequest)) {
+            return
+        }
+        prefetchAdjacentFrames(
+            mediaIo = mediaIo,
+            frameRequest = frameRequest,
+            targetWidth = targetWidth,
+            targetHeight = targetHeight,
+        )
+    }
+
+    private fun shouldPrefetchContext(frameRequest: ResolvedPreviewFrameRequest): Boolean {
+        return when (frameRequest.transportKind) {
+            "scrubBegin", "scrubUpdate", "seek" -> false
+            else -> true
+        }
+    }
+
+    private fun isPrefetchCancelled(
+        projectId: Int,
+        generation: Long,
+    ): Boolean {
+        return synchronized(lock) {
+            (prefetchGenerationByProject[projectId] ?: 0L) != generation
+        }
+    }
+
+    private fun shouldDropBeforeDecode(
+        projectId: Int,
+        sequence: Long,
+    ): Boolean {
+        return synchronized(lock) {
+            latestSequenceByProject[projectId] != sequence
         }
     }
 

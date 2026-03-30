@@ -66,6 +66,17 @@ uint8_t fusion_video_engine_set_clip_muted(
     const char* clip_id,
     uint8_t is_muted
 );
+uint8_t fusion_video_engine_set_clip_transform(
+    int64_t handle,
+    const char* clip_id,
+    double x,
+    double y,
+    double width,
+    double height,
+    double opacity,
+    double rotation_degrees,
+    int32_t z_index
+);
 uint8_t fusion_video_engine_import_asset(
     int64_t handle,
     const char* asset_id,

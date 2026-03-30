@@ -11,6 +11,7 @@ data class PreviewNodeLayout(
     val width: Int,
     val height: Int,
     val rotationDegrees: Float,
+    val opacity: Float,
 )
 
 data class PreviewContentLayout(
@@ -20,6 +21,11 @@ data class PreviewContentLayout(
     val height: Int,
     val rotationDegrees: Float,
 )
+
+enum class PreviewContentFitMode {
+    CONTAIN,
+    COVER,
+}
 
 object PreviewLayoutPlanner {
     fun resolveNodeLayout(
@@ -38,11 +44,9 @@ object PreviewLayoutPlanner {
         val nodeLeft =
             (((sceneNode?.get("x") as? Number)?.toDouble() ?: 0.0) * scaleX)
                 .roundToInt()
-                .coerceAtLeast(0)
         val nodeTop =
             (((sceneNode?.get("y") as? Number)?.toDouble() ?: 0.0) * scaleY)
                 .roundToInt()
-                .coerceAtLeast(0)
         val nodeWidth =
             (((sceneNode?.get("width") as? Number)?.toDouble()
                 ?: safeProjectWidth.toDouble()) * scaleX)
@@ -55,12 +59,15 @@ object PreviewLayoutPlanner {
                 .coerceAtLeast(1)
         val nodeRotation =
             ((sceneNode?.get("rotationDegrees") as? Number)?.toFloat() ?: 0f)
+        val nodeOpacity =
+            ((sceneNode?.get("opacity") as? Number)?.toFloat() ?: 1f).coerceIn(0f, 1f)
         return PreviewNodeLayout(
             left = nodeLeft,
             top = nodeTop,
             width = nodeWidth,
             height = nodeHeight,
             rotationDegrees = nodeRotation,
+            opacity = nodeOpacity,
         )
     }
 
@@ -70,6 +77,7 @@ object PreviewLayoutPlanner {
         mediaWidth: Int?,
         mediaHeight: Int?,
         mediaRotationDegrees: Int,
+        fitMode: PreviewContentFitMode = PreviewContentFitMode.CONTAIN,
     ): PreviewContentLayout {
         val safeContainerWidth = max(1, containerWidth)
         val safeContainerHeight = max(1, containerHeight)
@@ -80,10 +88,18 @@ object PreviewLayoutPlanner {
         val displayWidth = if (quarterTurn) rawMediaHeight else rawMediaWidth
         val displayHeight = if (quarterTurn) rawMediaWidth else rawMediaHeight
         val fitScale =
-            min(
-                safeContainerWidth.toFloat() / displayWidth.toFloat(),
-                safeContainerHeight.toFloat() / displayHeight.toFloat(),
-            )
+            when (fitMode) {
+                PreviewContentFitMode.CONTAIN ->
+                    min(
+                        safeContainerWidth.toFloat() / displayWidth.toFloat(),
+                        safeContainerHeight.toFloat() / displayHeight.toFloat(),
+                    )
+                PreviewContentFitMode.COVER ->
+                    max(
+                        safeContainerWidth.toFloat() / displayWidth.toFloat(),
+                        safeContainerHeight.toFloat() / displayHeight.toFloat(),
+                    )
+            }
         val fittedDisplayWidth =
             (displayWidth.toFloat() * fitScale).roundToInt().coerceAtLeast(1)
         val fittedDisplayHeight =
@@ -93,8 +109,8 @@ object PreviewLayoutPlanner {
         val rotatedChildHeight =
             if (quarterTurn) fittedDisplayWidth else fittedDisplayHeight
         return PreviewContentLayout(
-            left = ((safeContainerWidth - rotatedChildWidth) / 2).coerceAtLeast(0),
-            top = ((safeContainerHeight - rotatedChildHeight) / 2).coerceAtLeast(0),
+            left = (safeContainerWidth - rotatedChildWidth) / 2,
+            top = (safeContainerHeight - rotatedChildHeight) / 2,
             width = rotatedChildWidth,
             height = rotatedChildHeight,
             rotationDegrees = normalizedRotation.toFloat(),

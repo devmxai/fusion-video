@@ -1626,7 +1626,14 @@ class _TimelineVideoFilmstripState extends State<_TimelineVideoFilmstrip> {
   }
 
   void _refreshThumbnails() {
-    _seedThumbnails = _TimelineFilmstripCache.peekForPath(widget.path);
+    _seedThumbnails = _TimelineFilmstripCache.peek(
+      path: widget.path,
+      sourceOffsetSeconds: widget.sourceOffsetSeconds,
+      durationSeconds: widget.durationSeconds,
+      tileCount: _tileCount,
+      targetWidth: _targetWidth,
+      targetHeight: _targetHeight,
+    );
     if (widget.isPlaying && _seedThumbnails != null && _seedThumbnails!.isNotEmpty) {
       _thumbnailsFuture = null;
       return;
@@ -1739,11 +1746,28 @@ class _TimelineVideoFilmstripState extends State<_TimelineVideoFilmstrip> {
 class _TimelineFilmstripCache {
   static final Map<String, Future<List<Uint8List>>> _entries =
       <String, Future<List<Uint8List>>>{};
-  static final Map<String, List<Uint8List>> _pathEntries =
+  static final Map<String, List<Uint8List>> _segmentEntries =
       <String, List<Uint8List>>{};
   static final Map<String, Uint8List> _frameEntries = <String, Uint8List>{};
 
-  static List<Uint8List>? peekForPath(String path) => _pathEntries[path];
+  static List<Uint8List>? peek({
+    required String path,
+    required double sourceOffsetSeconds,
+    required double durationSeconds,
+    required int tileCount,
+    required int targetWidth,
+    required int targetHeight,
+  }) {
+    final key = _segmentKey(
+      path: path,
+      sourceOffsetSeconds: sourceOffsetSeconds,
+      durationSeconds: durationSeconds,
+      tileCount: tileCount,
+      targetWidth: targetWidth,
+      targetHeight: targetHeight,
+    );
+    return _segmentEntries[key];
+  }
 
   static double _normalizeTimestamp(double value) {
     return (value * 4).round() / 4;
@@ -1758,6 +1782,24 @@ class _TimelineFilmstripCache {
     return [
       path,
       timestampSeconds.toStringAsFixed(2),
+      targetWidth,
+      targetHeight,
+    ].join('|');
+  }
+
+  static String _segmentKey({
+    required String path,
+    required double sourceOffsetSeconds,
+    required double durationSeconds,
+    required int tileCount,
+    required int targetWidth,
+    required int targetHeight,
+  }) {
+    return [
+      path,
+      sourceOffsetSeconds.toStringAsFixed(3),
+      durationSeconds.toStringAsFixed(3),
+      tileCount,
       targetWidth,
       targetHeight,
     ].join('|');
@@ -1798,15 +1840,17 @@ class _TimelineFilmstripCache {
       missingTimestamps.add(normalizedTimestamps[i]);
     }
 
+    final segmentKey = _segmentKey(
+      path: path,
+      sourceOffsetSeconds: sourceOffsetSeconds,
+      durationSeconds: durationSeconds,
+      tileCount: tileCount,
+      targetWidth: targetWidth,
+      targetHeight: targetHeight,
+    );
     final key = [
-      path,
-      sourceOffsetSeconds.toStringAsFixed(3),
-      durationSeconds.toStringAsFixed(3),
-      tileCount,
-      targetWidth,
-      targetHeight,
-      for (final timestamp in normalizedTimestamps)
-        timestamp.toStringAsFixed(2),
+      segmentKey,
+      for (final timestamp in normalizedTimestamps) timestamp.toStringAsFixed(2),
     ].join('|');
     return _entries.putIfAbsent(
       key,
@@ -1831,7 +1875,8 @@ class _TimelineFilmstripCache {
               if (_frameEntries[frameKey] case final bytes?) bytes,
           ];
           if (thumbnails.isNotEmpty) {
-            _pathEntries[path] = List<Uint8List>.unmodifiable(thumbnails);
+            _segmentEntries[segmentKey] =
+                List<Uint8List>.unmodifiable(thumbnails);
           } else {
             _entries.remove(key);
           }

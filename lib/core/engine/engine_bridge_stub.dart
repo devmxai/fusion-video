@@ -5,6 +5,8 @@ class FusionVideoEngineStub implements FusionVideoEngineBridge {
   final Map<int, SimulatedProjectRuntime> _projects = {};
   final Map<int, List<EngineTimelineTrackSnapshot>> _timelineProjects = {};
   final Map<int, Map<String, EngineAssetDescriptor>> _assetProjects = {};
+  final Map<int, Map<String, EngineVisualTransformSnapshot>>
+      _visualTransformProjects = {};
   int _nextProjectId = 1;
   int _nextEditId = 1;
 
@@ -17,6 +19,7 @@ class FusionVideoEngineStub implements FusionVideoEngineBridge {
     _projects[id] = SimulatedProjectRuntime(config);
     _timelineProjects[id] = _buildDefaultTimeline();
     _assetProjects[id] = <String, EngineAssetDescriptor>{};
+    _visualTransformProjects[id] = <String, EngineVisualTransformSnapshot>{};
     return EngineProjectHandle(id);
   }
 
@@ -34,6 +37,7 @@ class FusionVideoEngineStub implements FusionVideoEngineBridge {
     runtime?.dispose();
     _timelineProjects.remove(handle.id);
     _assetProjects.remove(handle.id);
+    _visualTransformProjects.remove(handle.id);
   }
 
   @override
@@ -53,6 +57,7 @@ class FusionVideoEngineStub implements FusionVideoEngineBridge {
     EngineProjectHandle handle,
     EngineInsertClipRequest request,
   ) async {
+    final runtime = _runtimeFor(handle);
     final current = List<EngineTimelineTrackSnapshot>.from(
       _timelineProjects[handle.id] ?? const [],
     );
@@ -97,6 +102,10 @@ class FusionVideoEngineStub implements FusionVideoEngineBridge {
     }
 
     _timelineProjects[handle.id] = current;
+    _visualTransformProjects[handle.id]?[request.clipId] = _defaultTransformFor(
+      runtime.config,
+      request.trackKind,
+    );
     _syncRuntimeDuration(handle.id);
   }
 
@@ -144,13 +153,18 @@ class FusionVideoEngineStub implements FusionVideoEngineBridge {
     final rightDuration = location.endSeconds - splitAt;
     final stamp = _nextEditId++;
     final splitGroupId = 'bridge_$stamp';
+    final transformMap = _visualTransformProjects[handle.id];
+    final sourceTransform = transformMap?[location.clip.id] ??
+        _defaultTransformFor(_runtimeFor(handle).config, location.track.kind);
+    final leftClipId = '${location.clip.id}_a_$stamp';
+    final rightClipId = '${location.clip.id}_b_$stamp';
 
     final nextClips =
         List<EngineTimelineClipSnapshot>.from(location.track.clips)
           ..removeAt(location.clipIndex)
           ..insertAll(location.clipIndex, [
             EngineTimelineClipSnapshot(
-              id: '${location.clip.id}_a_$stamp',
+              id: leftClipId,
               durationSeconds: leftDuration,
               isMedia: true,
               assetId: location.clip.assetId,
@@ -160,7 +174,7 @@ class FusionVideoEngineStub implements FusionVideoEngineBridge {
               isMuted: location.clip.isMuted,
             ),
             EngineTimelineClipSnapshot(
-              id: '${location.clip.id}_b_$stamp',
+              id: rightClipId,
               durationSeconds: rightDuration,
               isMedia: true,
               assetId: location.clip.assetId,
@@ -177,6 +191,11 @@ class FusionVideoEngineStub implements FusionVideoEngineBridge {
       location.trackIndex,
       EngineTimelineTrackSnapshot(kind: location.track.kind, clips: nextClips),
     );
+    if (transformMap != null) {
+      transformMap.remove(location.clip.id);
+      transformMap[leftClipId] = sourceTransform;
+      transformMap[rightClipId] = sourceTransform;
+    }
   }
 
   @override
@@ -278,6 +297,7 @@ class FusionVideoEngineStub implements FusionVideoEngineBridge {
       location.trackIndex,
       EngineTimelineTrackSnapshot(kind: location.track.kind, clips: nextClips),
     );
+    _visualTransformProjects[handle.id]?.remove(clipId);
   }
 
   @override
@@ -291,8 +311,9 @@ class FusionVideoEngineStub implements FusionVideoEngineBridge {
     }
 
     final stamp = _nextEditId++;
+    final duplicateId = '${location.clip.id}_copy_$stamp';
     final duplicate = EngineTimelineClipSnapshot(
-      id: '${location.clip.id}_copy_$stamp',
+      id: duplicateId,
       durationSeconds: location.clip.durationSeconds,
       isMedia: location.clip.isMedia,
       assetId: location.clip.assetId,
@@ -310,6 +331,10 @@ class FusionVideoEngineStub implements FusionVideoEngineBridge {
       location.trackIndex,
       EngineTimelineTrackSnapshot(kind: location.track.kind, clips: nextClips),
     );
+    final sourceTransform = _visualTransformProjects[handle.id]?[location.clip.id];
+    if (sourceTransform != null) {
+      _visualTransformProjects[handle.id]?[duplicateId] = sourceTransform;
+    }
   }
 
   @override
@@ -399,6 +424,19 @@ class FusionVideoEngineStub implements FusionVideoEngineBridge {
   }
 
   @override
+  Future<void> setClipTransform(
+    EngineProjectHandle handle,
+    String clipId,
+    EngineVisualTransformSnapshot transform,
+  ) async {
+    final location = _findClip(handle.id, clipId);
+    if (location == null || !location.clip.isMedia) {
+      return;
+    }
+    _visualTransformProjects[handle.id]?[clipId] = transform;
+  }
+
+  @override
   Future<List<EngineTimelineTrackSnapshot>> fetchTimelineTracks(
     EngineProjectHandle handle,
   ) async {
@@ -415,6 +453,10 @@ class FusionVideoEngineStub implements FusionVideoEngineBridge {
     final tracks = _timelineProjects[handle.id] ?? const [];
     final assets =
         _assetProjects[handle.id] ?? const <String, EngineAssetDescriptor>{};
+    final transforms =
+        _visualTransformProjects[handle.id] ??
+            const <String, EngineVisualTransformSnapshot>{};
+    final runtime = _projects[handle.id];
     final nodes = <EngineCompositionNodeSnapshot>[];
 
     for (final track in tracks) {
@@ -457,7 +499,18 @@ class FusionVideoEngineStub implements FusionVideoEngineBridge {
             sourceStartSeconds: sourceStartSeconds,
             sourceEndSeconds: sourceStartSeconds + clip.durationSeconds,
             sourcePositionSeconds: sourcePositionSeconds,
-            transform: _defaultTransformFor(asset.kind),
+            transform: transforms[clip.id] ??
+                _defaultTransformFor(
+                  runtime?.config ??
+                      const EngineProjectConfig(
+                        width: 1080,
+                        height: 1920,
+                        fps: 30,
+                        sampleRate: 48000,
+                        durationSeconds: 0,
+                      ),
+                  asset.kind,
+                ),
           ),
         );
       }
@@ -597,44 +650,49 @@ class FusionVideoEngineStub implements FusionVideoEngineBridge {
     runtime.updateDuration(timelineDuration);
   }
 
-  EngineVisualTransformSnapshot _defaultTransformFor(EngineTrackKind kind) {
+  EngineVisualTransformSnapshot _defaultTransformFor(
+    EngineProjectConfig config,
+    EngineTrackKind kind,
+  ) {
+    final width = config.width.toDouble();
+    final height = config.height.toDouble();
     switch (kind) {
       case EngineTrackKind.video:
-        return const EngineVisualTransformSnapshot(
+        return EngineVisualTransformSnapshot(
           x: 0,
           y: 0,
-          width: 1080,
-          height: 1920,
+          width: width,
+          height: height,
           opacity: 1,
           rotationDegrees: 0,
           zIndex: 0,
         );
       case EngineTrackKind.image:
-        return const EngineVisualTransformSnapshot(
+        return EngineVisualTransformSnapshot(
           x: 0,
           y: 0,
-          width: 1080,
-          height: 1920,
+          width: width,
+          height: height,
           opacity: 1,
           rotationDegrees: 0,
           zIndex: 10,
         );
       case EngineTrackKind.text:
-        return const EngineVisualTransformSnapshot(
-          x: 120,
-          y: 1480,
-          width: 840,
-          height: 220,
+        return EngineVisualTransformSnapshot(
+          x: width * 0.111,
+          y: height * 0.77,
+          width: width * 0.777,
+          height: height * 0.114,
           opacity: 1,
           rotationDegrees: 0,
           zIndex: 20,
         );
       case EngineTrackKind.lipSync:
-        return const EngineVisualTransformSnapshot(
-          x: 250,
-          y: 1260,
-          width: 580,
-          height: 220,
+        return EngineVisualTransformSnapshot(
+          x: width * 0.231,
+          y: height * 0.656,
+          width: width * 0.537,
+          height: height * 0.114,
           opacity: 1,
           rotationDegrees: 0,
           zIndex: 30,

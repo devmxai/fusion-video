@@ -4,7 +4,6 @@ import android.graphics.BitmapFactory
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Color
-import android.graphics.Matrix
 import android.graphics.SurfaceTexture
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
@@ -24,6 +23,8 @@ import android.view.View
 import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.TextView
+import com.example.fx_flutter_editor.previewengine.AndroidMediaIo
+import com.example.fx_flutter_editor.previewengine.AndroidTimelineThumbnailRepository
 import com.example.fx_flutter_editor.previewengine.FusionAndroidPreviewEngine
 import com.example.fx_flutter_editor.previewengine.PreviewTransportCommandEnvelope
 import com.example.fx_flutter_editor.previewengine.ResolvedPreviewConfiguration
@@ -34,14 +35,15 @@ import io.flutter.plugin.common.MethodChannel
 import io.flutter.plugin.common.StandardMessageCodec
 import io.flutter.plugin.platform.PlatformView
 import io.flutter.plugin.platform.PlatformViewFactory
-import java.io.ByteArrayOutputStream
 import java.util.concurrent.Executors
 import kotlin.math.roundToInt
 
 class MainActivity : FlutterActivity() {
-    private val mediaThumbnailExecutor = Executors.newSingleThreadExecutor()
+    private val mediaThumbnailExecutor = Executors.newFixedThreadPool(2)
     private val mainHandler = Handler(Looper.getMainLooper())
-    private val previewEngine = FusionAndroidPreviewEngine()
+    private val mediaIo = AndroidMediaIo()
+    private val timelineThumbnailRepository = AndroidTimelineThumbnailRepository(mediaIo)
+    private val previewEngine = FusionAndroidPreviewEngine(mediaIo = mediaIo)
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -109,7 +111,7 @@ class MainActivity : FlutterActivity() {
                 return@setMethodCallHandler
             }
 
-            FusionPreviewRegistry.update(
+            FusionPreviewRegistry.updateLegacyPreview(
                 projectId,
                 transportRevision,
                 sourceId,
@@ -151,7 +153,7 @@ class MainActivity : FlutterActivity() {
                         result.error("invalid_args", "Missing preview engine arguments", null)
                         return@setMethodCallHandler
                     }
-                    FusionPreviewRegistry.update(
+                    FusionPreviewRegistry.cachePayload(
                         projectId,
                         (args["transportRevision"] as? Number)?.toInt() ?: 0,
                         args["sourceId"] as? String,
@@ -257,6 +259,7 @@ class MainActivity : FlutterActivity() {
                         commandKind = kind,
                         positionSeconds = (args["positionSeconds"] as? Number)?.toDouble(),
                         isPlaying = args["isPlaying"] as? Boolean,
+                        updateLegacyViews = false,
                     )
                     result.success(null)
                 }
@@ -305,7 +308,7 @@ class MainActivity : FlutterActivity() {
                     mediaThumbnailExecutor.execute {
                         try {
                             val thumbnails =
-                                FusionMediaThumbnailGenerator.generateVideoThumbnails(
+                                timelineThumbnailRepository.loadVideoThumbnails(
                                     path = path,
                                     timestampsSeconds = timestampsSeconds,
                                     targetWidth = targetWidth,
@@ -420,109 +423,14 @@ private object FusionMediaProbe {
     }
 }
 
-private object FusionMediaThumbnailGenerator {
-    fun generateVideoThumbnails(
-        path: String,
-        timestampsSeconds: List<Double>,
-        targetWidth: Int,
-        targetHeight: Int,
-    ): List<ByteArray> {
-        if (timestampsSeconds.isEmpty()) {
-            return emptyList()
-        }
-
-        val retriever = MediaMetadataRetriever()
-        return try {
-            retriever.setDataSource(path)
-            val rotationDegrees =
-                retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)
-                    ?.toIntOrNull() ?: 0
-            timestampsSeconds.mapNotNull { seconds ->
-                val frame = retriever.getFrameAtTime(
-                    (seconds.coerceAtLeast(0.0) * 1_000_000L).toLong(),
-                    MediaMetadataRetriever.OPTION_CLOSEST,
-                ) ?: return@mapNotNull null
-                val rotated = rotateBitmap(frame, rotationDegrees)
-                val scaled =
-                    scaleBitmapToFill(
-                        rotated,
-                        targetWidth.coerceAtLeast(24),
-                        targetHeight.coerceAtLeast(24),
-                    )
-                val buffer = ByteArrayOutputStream()
-                scaled.compress(Bitmap.CompressFormat.PNG, 100, buffer)
-                if (scaled !== rotated) {
-                    scaled.recycle()
-                }
-                if (rotated !== frame) {
-                    rotated.recycle()
-                }
-                frame.recycle()
-                buffer.toByteArray()
-            }
-        } finally {
-            retriever.release()
-        }
-    }
-
-    private fun rotateBitmap(bitmap: Bitmap, rotationDegrees: Int): Bitmap {
-        val normalized = ((rotationDegrees % 360) + 360) % 360
-        if (normalized == 0) {
-            return bitmap
-        }
-        val matrix =
-            Matrix().apply {
-                postRotate(normalized.toFloat())
-            }
-        return Bitmap.createBitmap(
-            bitmap,
-            0,
-            0,
-            bitmap.width,
-            bitmap.height,
-            matrix,
-            true,
-        )
-    }
-
-    private fun scaleBitmapToFill(
-        bitmap: Bitmap,
-        targetWidth: Int,
-        targetHeight: Int,
-    ): Bitmap {
-        val scale =
-            maxOf(
-                targetWidth.toFloat() / bitmap.width.toFloat().coerceAtLeast(1f),
-                targetHeight.toFloat() / bitmap.height.toFloat().coerceAtLeast(1f),
-            )
-        val scaledWidth = (bitmap.width.toFloat() * scale).roundToInt().coerceAtLeast(1)
-        val scaledHeight = (bitmap.height.toFloat() * scale).roundToInt().coerceAtLeast(1)
-        val scaled =
-            if (bitmap.width == scaledWidth && bitmap.height == scaledHeight) {
-                bitmap
-            } else {
-                Bitmap.createScaledBitmap(bitmap, scaledWidth, scaledHeight, true)
-            }
-        val offsetX = ((scaledWidth - targetWidth) / 2).coerceAtLeast(0)
-        val offsetY = ((scaledHeight - targetHeight) / 2).coerceAtLeast(0)
-        return Bitmap.createBitmap(
-            scaled,
-            offsetX,
-            offsetY,
-            targetWidth.coerceAtMost(scaled.width).coerceAtLeast(1),
-            targetHeight.coerceAtMost(scaled.height).coerceAtLeast(1),
-        )
-    }
-}
-
 object FusionPreviewRegistry {
-    private val views = mutableMapOf<Int, MutableList<FusionPreviewNativeView>>()
+    private val legacyViews = mutableMapOf<Int, MutableList<FusionPreviewNativeView>>()
     private val payloads = mutableMapOf<Int, FusionPreviewPayload>()
     private val runtimeStates = mutableMapOf<Int, FusionPreviewRuntimeState>()
     private var eventSink: EventChannel.EventSink? = null
 
-    fun attach(projectId: Int, view: FusionPreviewNativeView) {
-        val bucket = views.getOrPut(projectId) { mutableListOf() }
+    fun attachLegacyView(projectId: Int, view: FusionPreviewNativeView) {
+        val bucket = legacyViews.getOrPut(projectId) { mutableListOf() }
         bucket.add(view)
         payloads[projectId]?.let {
             view.update(
@@ -551,15 +459,15 @@ object FusionPreviewRegistry {
         }
     }
 
-    fun detach(projectId: Int, view: FusionPreviewNativeView) {
-        views[projectId]?.remove(view)
-        if (views[projectId].isNullOrEmpty()) {
-            views.remove(projectId)
+    fun detachLegacyView(projectId: Int, view: FusionPreviewNativeView) {
+        legacyViews[projectId]?.remove(view)
+        if (legacyViews[projectId].isNullOrEmpty()) {
+            legacyViews.remove(projectId)
             runtimeStates.remove(projectId)
         }
     }
 
-    fun update(
+    fun cachePayload(
         projectId: Int,
         transportRevision: Int,
         sourceId: String?,
@@ -583,7 +491,8 @@ object FusionPreviewRegistry {
         positionSeconds: Double,
         isPlaying: Boolean,
     ) {
-        payloads[projectId] = FusionPreviewPayload(
+        val payload =
+            FusionPreviewPayload(
             transportRevision = transportRevision,
             sourceId = sourceId,
             sourcePath = sourcePath,
@@ -606,7 +515,59 @@ object FusionPreviewRegistry {
             positionSeconds = positionSeconds,
             isPlaying = isPlaying,
         )
-        views[projectId]?.forEach {
+        payloads[projectId] = payload
+        emitRuntimeEvent(projectId, payload)
+    }
+
+    fun updateLegacyPreview(
+        projectId: Int,
+        transportRevision: Int,
+        sourceId: String?,
+        sourcePath: String?,
+        sourceKind: String?,
+        upcomingSourceId: String?,
+        upcomingSourcePath: String?,
+        upcomingSourceKind: String?,
+        clipStartSeconds: Double?,
+        clipEndSeconds: Double?,
+        sourceStartSeconds: Double?,
+        sourceEndSeconds: Double?,
+        upcomingSourceStartSeconds: Double?,
+        upcomingSourceEndSeconds: Double?,
+        projectWidth: Int?,
+        projectHeight: Int?,
+        baseClipId: String?,
+        baseClipIds: List<String>,
+        selectedClipId: String?,
+        sceneNodes: List<Map<String, Any?>>,
+        positionSeconds: Double,
+        isPlaying: Boolean,
+    ) {
+        cachePayload(
+            projectId = projectId,
+            transportRevision = transportRevision,
+            sourceId = sourceId,
+            sourcePath = sourcePath,
+            sourceKind = sourceKind,
+            upcomingSourceId = upcomingSourceId,
+            upcomingSourcePath = upcomingSourcePath,
+            upcomingSourceKind = upcomingSourceKind,
+            clipStartSeconds = clipStartSeconds,
+            clipEndSeconds = clipEndSeconds,
+            sourceStartSeconds = sourceStartSeconds,
+            sourceEndSeconds = sourceEndSeconds,
+            upcomingSourceStartSeconds = upcomingSourceStartSeconds,
+            upcomingSourceEndSeconds = upcomingSourceEndSeconds,
+            projectWidth = projectWidth,
+            projectHeight = projectHeight,
+            baseClipId = baseClipId,
+            baseClipIds = baseClipIds,
+            selectedClipId = selectedClipId,
+            sceneNodes = sceneNodes,
+            positionSeconds = positionSeconds,
+            isPlaying = isPlaying,
+        )
+        legacyViews[projectId]?.forEach {
             it.update(
                 transportRevision,
                 sourceId,
@@ -631,7 +592,6 @@ object FusionPreviewRegistry {
                 isPlaying,
             )
         }
-        emitRuntimeEvent(projectId, payloads.getValue(projectId))
     }
 
     fun dispatchCommand(
@@ -640,6 +600,7 @@ object FusionPreviewRegistry {
         commandKind: String,
         positionSeconds: Double?,
         isPlaying: Boolean?,
+        updateLegacyViews: Boolean = true,
     ) {
         val current = payloads[projectId] ?: FusionPreviewPayload(
             transportRevision = transportRevision,
@@ -669,30 +630,57 @@ object FusionPreviewRegistry {
             "pause" -> false
             else -> current.isPlaying
         }
-        update(
-            projectId = projectId,
-            transportRevision = transportRevision,
-            sourceId = current.sourceId,
-            sourcePath = current.sourcePath,
-            sourceKind = current.sourceKind,
-            upcomingSourceId = current.upcomingSourceId,
-            upcomingSourcePath = current.upcomingSourcePath,
-            upcomingSourceKind = current.upcomingSourceKind,
-            clipStartSeconds = current.clipStartSeconds,
-            clipEndSeconds = current.clipEndSeconds,
-            sourceStartSeconds = current.sourceStartSeconds,
-            sourceEndSeconds = current.sourceEndSeconds,
-            upcomingSourceStartSeconds = current.upcomingSourceStartSeconds,
-            upcomingSourceEndSeconds = current.upcomingSourceEndSeconds,
-            projectWidth = current.projectWidth,
-            projectHeight = current.projectHeight,
-            baseClipId = current.baseClipId,
-            baseClipIds = current.baseClipIds,
-            selectedClipId = current.selectedClipId,
-            sceneNodes = current.sceneNodes,
-            positionSeconds = positionSeconds ?: current.positionSeconds,
-            isPlaying = nextIsPlaying,
-        )
+        if (updateLegacyViews) {
+            updateLegacyPreview(
+                projectId = projectId,
+                transportRevision = transportRevision,
+                sourceId = current.sourceId,
+                sourcePath = current.sourcePath,
+                sourceKind = current.sourceKind,
+                upcomingSourceId = current.upcomingSourceId,
+                upcomingSourcePath = current.upcomingSourcePath,
+                upcomingSourceKind = current.upcomingSourceKind,
+                clipStartSeconds = current.clipStartSeconds,
+                clipEndSeconds = current.clipEndSeconds,
+                sourceStartSeconds = current.sourceStartSeconds,
+                sourceEndSeconds = current.sourceEndSeconds,
+                upcomingSourceStartSeconds = current.upcomingSourceStartSeconds,
+                upcomingSourceEndSeconds = current.upcomingSourceEndSeconds,
+                projectWidth = current.projectWidth,
+                projectHeight = current.projectHeight,
+                baseClipId = current.baseClipId,
+                baseClipIds = current.baseClipIds,
+                selectedClipId = current.selectedClipId,
+                sceneNodes = current.sceneNodes,
+                positionSeconds = positionSeconds ?: current.positionSeconds,
+                isPlaying = nextIsPlaying,
+            )
+        } else {
+            cachePayload(
+                projectId = projectId,
+                transportRevision = transportRevision,
+                sourceId = current.sourceId,
+                sourcePath = current.sourcePath,
+                sourceKind = current.sourceKind,
+                upcomingSourceId = current.upcomingSourceId,
+                upcomingSourcePath = current.upcomingSourcePath,
+                upcomingSourceKind = current.upcomingSourceKind,
+                clipStartSeconds = current.clipStartSeconds,
+                clipEndSeconds = current.clipEndSeconds,
+                sourceStartSeconds = current.sourceStartSeconds,
+                sourceEndSeconds = current.sourceEndSeconds,
+                upcomingSourceStartSeconds = current.upcomingSourceStartSeconds,
+                upcomingSourceEndSeconds = current.upcomingSourceEndSeconds,
+                projectWidth = current.projectWidth,
+                projectHeight = current.projectHeight,
+                baseClipId = current.baseClipId,
+                baseClipIds = current.baseClipIds,
+                selectedClipId = current.selectedClipId,
+                sceneNodes = current.sceneNodes,
+                positionSeconds = positionSeconds ?: current.positionSeconds,
+                isPlaying = nextIsPlaying,
+            )
+        }
     }
 
     fun addEventSink(sink: EventChannel.EventSink) {
@@ -903,7 +891,7 @@ class FusionPreviewNativeView(
         addView(textureView)
         addView(overlayContainer)
 
-        FusionPreviewRegistry.attach(projectId, this)
+        FusionPreviewRegistry.attachLegacyView(projectId, this)
         update(
             0,
             null,
@@ -1029,7 +1017,7 @@ class FusionPreviewNativeView(
         removeCallbacks(boundaryRunnable)
         surface?.release()
         surface = null
-        FusionPreviewRegistry.detach(projectId, this)
+        FusionPreviewRegistry.detachLegacyView(projectId, this)
     }
 
     private fun loadSource() {

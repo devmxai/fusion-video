@@ -41,6 +41,7 @@ class PreviewFramePlannerTest {
                 timelinePositionSeconds = 0.0,
                 isPlaying = false,
                 transportRevision = 3,
+                transportKind = "seek",
             )
 
         assertNotNull(frameRequest)
@@ -83,6 +84,7 @@ class PreviewFramePlannerTest {
                 timelinePositionSeconds = 99.0,
                 isPlaying = true,
                 transportRevision = 8,
+                transportKind = "play",
             )
 
         assertNotNull(frameRequest)

@@ -4,15 +4,17 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import 'preview_feature_flags.dart';
+
 class FusionPreviewSurface extends StatelessWidget {
   const FusionPreviewSurface({
     super.key,
     required this.projectId,
-    this.useAndroidEngineSurface = false,
+    this.useAndroidEngineSurface,
   });
 
   final int projectId;
-  final bool useAndroidEngineSurface;
+  final bool? useAndroidEngineSurface;
 
   @override
   Widget build(BuildContext context) {
@@ -23,6 +25,8 @@ class FusionPreviewSurface extends StatelessWidget {
     final creationParams = <String, dynamic>{
       'projectId': projectId,
     };
+    final resolvedUseAndroidEngineSurface =
+        useAndroidEngineSurface ?? PreviewFeatureFlags.useAndroidEngineSurface;
 
     if (Platform.isIOS) {
       return UiKitView(
@@ -34,7 +38,7 @@ class FusionPreviewSurface extends StatelessWidget {
     }
 
     return AndroidView(
-      viewType: useAndroidEngineSurface
+      viewType: resolvedUseAndroidEngineSurface
           ? 'fusion_video/preview_surface_engine'
           : 'fusion_video/preview_surface',
       layoutDirection: TextDirection.ltr,

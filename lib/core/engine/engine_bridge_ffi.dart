@@ -102,6 +102,28 @@ typedef _EngineSetClipMutedDart = int Function(
   ffi.Pointer<ffi.Char> clipId,
   int isMuted,
 );
+typedef _EngineSetClipTransformNative = ffi.Uint8 Function(
+  ffi.Int64 handle,
+  ffi.Pointer<ffi.Char> clipId,
+  ffi.Double x,
+  ffi.Double y,
+  ffi.Double width,
+  ffi.Double height,
+  ffi.Double opacity,
+  ffi.Double rotationDegrees,
+  ffi.Int32 zIndex,
+);
+typedef _EngineSetClipTransformDart = int Function(
+  int handle,
+  ffi.Pointer<ffi.Char> clipId,
+  double x,
+  double y,
+  double width,
+  double height,
+  double opacity,
+  double rotationDegrees,
+  int zIndex,
+);
 typedef _EngineInsertClipNative = ffi.Uint8 Function(
   ffi.Int64 handle,
   ffi.Uint8 trackKind,
@@ -221,6 +243,15 @@ class FusionVideoFfiBridge implements FusionVideoEngineBridge {
             _EngineSetClipGainDart>('fusion_video_engine_set_clip_gain'),
         _engineSetClipMuted = library.lookupFunction<_EngineSetClipMutedNative,
             _EngineSetClipMutedDart>('fusion_video_engine_set_clip_muted'),
+        _engineSetClipTransform = (() {
+          try {
+            return library.lookupFunction<_EngineSetClipTransformNative,
+                    _EngineSetClipTransformDart>(
+                'fusion_video_engine_set_clip_transform');
+          } catch (_) {
+            return null;
+          }
+        })(),
         _engineInsertClip = library.lookupFunction<_EngineInsertClipNative,
             _EngineInsertClipDart>('fusion_video_engine_insert_clip'),
         _engineImportAsset = library.lookupFunction<_EngineImportAssetNative,
@@ -265,6 +296,7 @@ class FusionVideoFfiBridge implements FusionVideoEngineBridge {
   final _EngineReorderClipDart? _engineReorderClip;
   final _EngineSetClipGainDart _engineSetClipGain;
   final _EngineSetClipMutedDart _engineSetClipMuted;
+  final _EngineSetClipTransformDart? _engineSetClipTransform;
   final _EngineInsertClipDart _engineInsertClip;
   final _EngineImportAssetDart _engineImportAsset;
   final _EngineGetPlaybackStateDart _engineGetPlaybackState;
@@ -662,6 +694,39 @@ class FusionVideoFfiBridge implements FusionVideoEngineBridge {
       _ensureSuccess(
         _engineSetClipMuted(handle.id, nativeClipId.cast(), muted ? 1 : 0),
         'set clip muted state',
+      );
+    } finally {
+      malloc.free(nativeClipId);
+    }
+  }
+
+  @override
+  Future<void> setClipTransform(
+    EngineProjectHandle handle,
+    String clipId,
+    EngineVisualTransformSnapshot transform,
+  ) async {
+    final setClipTransform = _engineSetClipTransform;
+    if (setClipTransform == null) {
+      throw UnsupportedError(
+        'Loaded Fusion Video engine does not support clip transforms yet. Rebuild the native engine artifacts.',
+      );
+    }
+    final nativeClipId = clipId.toNativeUtf8();
+    try {
+      _ensureSuccess(
+        setClipTransform(
+          handle.id,
+          nativeClipId.cast(),
+          transform.x,
+          transform.y,
+          transform.width,
+          transform.height,
+          transform.opacity.clamp(0.0, 1.0),
+          transform.rotationDegrees,
+          transform.zIndex,
+        ),
+        'set clip transform',
       );
     } finally {
       malloc.free(nativeClipId);

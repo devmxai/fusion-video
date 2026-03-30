@@ -8,7 +8,7 @@ use std::{
 };
 
 use crate::{
-    project::{AssetState, ProjectState, TrackKind},
+    project::{AssetState, ProjectState, TrackKind, VisualTransformState},
     timeline::{PlaybackState, TransportState},
 };
 
@@ -356,6 +356,47 @@ pub extern "C" fn fusion_video_engine_set_clip_muted(
 
     with_runtime(handle, |runtime| {
         if runtime.project.set_clip_muted(clip_id, is_muted != 0) {
+            1
+        } else {
+            0
+        }
+    })
+    .unwrap_or(0)
+}
+
+#[no_mangle]
+pub extern "C" fn fusion_video_engine_set_clip_transform(
+    handle: i64,
+    clip_id: *const std::os::raw::c_char,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    opacity: f64,
+    rotation_degrees: f64,
+    z_index: i32,
+) -> u8 {
+    if clip_id.is_null() {
+        return 0;
+    }
+
+    let Ok(clip_id) = unsafe { CStr::from_ptr(clip_id) }.to_str() else {
+        return 0;
+    };
+
+    with_runtime(handle, |runtime| {
+        if runtime.project.set_clip_transform(
+            clip_id,
+            VisualTransformState {
+                x,
+                y,
+                width,
+                height,
+                opacity: opacity.clamp(0.0, 1.0),
+                rotation_degrees,
+                z_index,
+            },
+        ) {
             1
         } else {
             0

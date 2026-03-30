@@ -44,6 +44,7 @@ data class PreviewTransportCommandEnvelope(
 data class ResolvedPreviewFrameRequest(
     val projectId: Int,
     val transportRevision: Int,
+    val transportKind: String?,
     val sourceId: String?,
     val sourcePath: String,
     val sourceKind: String,
@@ -59,6 +60,42 @@ data class ResolvedPreviewFrameRequest(
     val isPlaying: Boolean,
     val frameToken: String,
 )
+
+data class ResolvedPreviewAudioRequest(
+    val projectId: Int,
+    val clipId: String?,
+    val sourcePath: String,
+    val sourceKind: String,
+    val continuityKind: String?,
+    val timelinePositionSeconds: Double,
+    val sourcePositionSeconds: Double,
+    val clipStartSeconds: Double,
+    val clipEndSeconds: Double?,
+    val sourceStartSeconds: Double,
+    val sourceEndSeconds: Double?,
+    val gain: Double,
+    val isMuted: Boolean,
+    val transportRevision: Int,
+    val isPlaying: Boolean,
+) {
+    val sessionKey: String
+        get() =
+            if (continuityKind == "sameSourceContiguous" && sourceKind != "image") {
+                "$projectId|$sourcePath|$sourceKind|continuous"
+            } else {
+                buildString {
+                    append(projectId)
+                    append('|')
+                    append(sourcePath)
+                    append('|')
+                    append(sourceKind)
+                    append('|')
+                    append(sourceStartSeconds)
+                    append('|')
+                    append(sourceEndSeconds ?: -1.0)
+                }
+            }
+}
 
 internal object PreviewFramePlanner {
     fun clampTimelinePosition(
@@ -89,6 +126,7 @@ internal object PreviewFramePlanner {
         timelinePositionSeconds: Double,
         isPlaying: Boolean,
         transportRevision: Int,
+        transportKind: String?,
     ): ResolvedPreviewFrameRequest? {
         val sourcePath = configuration.sourcePath?.takeIf { it.isNotBlank() } ?: return null
         val sourceKind = configuration.sourceKind?.takeIf { it.isNotBlank() } ?: return null
@@ -121,6 +159,7 @@ internal object PreviewFramePlanner {
         return ResolvedPreviewFrameRequest(
             projectId = configuration.projectId,
             transportRevision = transportRevision,
+            transportKind = transportKind,
             sourceId = configuration.sourceId,
             sourcePath = sourcePath,
             sourceKind = sourceKind,
@@ -137,6 +176,98 @@ internal object PreviewFramePlanner {
             frameToken = frameToken,
         )
     }
+}
+
+internal object PreviewAudioPlanner {
+    fun resolveAudioRequest(
+        configuration: ResolvedPreviewConfiguration,
+        timelinePositionSeconds: Double,
+        transportRevision: Int,
+        isPlaying: Boolean,
+    ): ResolvedPreviewAudioRequest? {
+        val activeRequests =
+            configuration.audioNodes.mapNotNull { node ->
+                resolveAudioNode(
+                    configuration = configuration,
+                    node = node,
+                    timelinePositionSeconds = timelinePositionSeconds,
+                    transportRevision = transportRevision,
+                    isPlaying = isPlaying,
+                )
+            }
+        if (activeRequests.isEmpty()) {
+            return null
+        }
+        return activeRequests.maxWithOrNull(
+            compareBy<ResolvedPreviewAudioRequest>(
+                { audioPriority(configuration, it) },
+                { it.clipStartSeconds },
+                { it.sourceStartSeconds },
+            ),
+        )
+    }
+
+    private fun resolveAudioNode(
+        configuration: ResolvedPreviewConfiguration,
+        node: Map<String, Any?>,
+        timelinePositionSeconds: Double,
+        transportRevision: Int,
+        isPlaying: Boolean,
+    ): ResolvedPreviewAudioRequest? {
+        val sourcePath = (node["localPath"] as? String)?.takeIf { it.isNotBlank() } ?: return null
+        val sourceKind = (node["kind"] as? String)?.takeIf { it.isNotBlank() } ?: return null
+        val clipStartSeconds = max(0.0, (node["clipStartSeconds"] as? Number)?.toDouble() ?: 0.0)
+        val clipEndSeconds = (node["clipEndSeconds"] as? Number)?.toDouble()
+        if (timelinePositionSeconds + AUDIO_EPSILON < clipStartSeconds) {
+            return null
+        }
+        if (clipEndSeconds != null && timelinePositionSeconds > clipEndSeconds + AUDIO_EPSILON) {
+            return null
+        }
+        val sourceStartSeconds =
+            max(0.0, (node["sourceStartSeconds"] as? Number)?.toDouble() ?: 0.0)
+        val sourceEndSeconds = (node["sourceEndSeconds"] as? Number)?.toDouble()
+        val clipLocalSeconds = max(0.0, timelinePositionSeconds - clipStartSeconds)
+        val sourcePositionSeconds =
+            sourceEndSeconds?.let { (sourceStartSeconds + clipLocalSeconds).coerceAtMost(it) }
+                ?: (sourceStartSeconds + clipLocalSeconds)
+        return ResolvedPreviewAudioRequest(
+            projectId = configuration.projectId,
+            clipId = node["clipId"] as? String,
+            sourcePath = sourcePath,
+            sourceKind = sourceKind,
+            continuityKind = configuration.continuityKind,
+            timelinePositionSeconds = timelinePositionSeconds.coerceAtLeast(0.0),
+            sourcePositionSeconds = sourcePositionSeconds.coerceAtLeast(0.0),
+            clipStartSeconds = clipStartSeconds,
+            clipEndSeconds = clipEndSeconds,
+            sourceStartSeconds = sourceStartSeconds,
+            sourceEndSeconds = sourceEndSeconds,
+            gain = (node["gain"] as? Number)?.toDouble() ?: 1.0,
+            isMuted = node["isMuted"] as? Boolean ?: false,
+            transportRevision = transportRevision,
+            isPlaying = isPlaying,
+        )
+    }
+
+    private fun audioPriority(
+        configuration: ResolvedPreviewConfiguration,
+        request: ResolvedPreviewAudioRequest,
+    ): Int {
+        return when {
+            request.clipId != null &&
+                request.clipId == configuration.baseClipId &&
+                request.sourceKind == "video" -> 500
+            request.clipId != null &&
+                configuration.baseClipIds.contains(request.clipId) &&
+                request.sourceKind == "video" -> 400
+            request.sourceKind == "video" -> 300
+            request.sourceKind == "audio" -> 200
+            else -> 100
+        }
+    }
+
+    private const val AUDIO_EPSILON = 0.0005
 }
 
 class FusionAndroidPreviewEngine(
@@ -156,9 +287,12 @@ class FusionAndroidPreviewEngine(
         var currentTimelinePositionSeconds: Double = 0.0,
         var isPlaying: Boolean = false,
         var transportRevision: Int = 0,
+        var lastTransportKind: String? = null,
         var playbackAnchorRealtimeMs: Long = 0L,
         var playbackAnchorPositionSeconds: Double = 0.0,
         var tickScheduled: Boolean = false,
+        var lastEmittedFrameRequest: ResolvedPreviewFrameRequest? = null,
+        var lastFrameEmitRealtimeMs: Long = 0L,
         val outputs: MutableSet<Output> = linkedSetOf(),
     )
 
@@ -173,7 +307,7 @@ class FusionAndroidPreviewEngine(
     fun attachOutput(projectId: Int, output: Output) {
         val session = sessionFor(projectId)
         session.outputs.add(output)
-        emitFrameRequest(session)
+        emitFrameRequest(session, force = true)
         if (session.isPlaying) {
             schedulePlaybackTick(projectId)
         }
@@ -197,13 +331,14 @@ class FusionAndroidPreviewEngine(
                 configuration.positionSeconds,
             )
         session.transportRevision = configuration.transportRevision
+        session.lastTransportKind = if (configuration.isPlaying) "play" else "configure"
         session.isPlaying = configuration.isPlaying
         if (session.isPlaying) {
             startPlaybackClock(session)
         } else {
             stopPlaybackClock(session)
         }
-        emitFrameRequest(session)
+        emitFrameRequest(session, force = true)
     }
 
     fun dispatch(command: PreviewTransportCommandEnvelope) {
@@ -211,6 +346,7 @@ class FusionAndroidPreviewEngine(
         val session = sessionFor(command.projectId)
         val configuration = session.configuration
         session.transportRevision = command.transportRevision
+        session.lastTransportKind = command.kind
         val targetTimelinePosition =
             PreviewFramePlanner.clampTimelinePosition(
                 configuration,
@@ -261,7 +397,7 @@ class FusionAndroidPreviewEngine(
                 session.currentTimelinePositionSeconds = targetTimelinePosition
             }
         }
-        emitFrameRequest(session)
+        emitFrameRequest(session, force = true)
     }
 
     fun sceneNodeForClip(
@@ -275,6 +411,78 @@ class FusionAndroidPreviewEngine(
             ?.configuration
             ?.sceneNodes
             ?.lastOrNull { node -> (node["clipId"] as? String) == clipId }
+    }
+
+    fun audioRequestForProject(projectId: Int): ResolvedPreviewAudioRequest? {
+        val session = sessions[projectId] ?: return null
+        val configuration = session.configuration ?: return null
+        return PreviewAudioPlanner.resolveAudioRequest(
+            configuration = configuration,
+            timelinePositionSeconds = session.currentTimelinePositionSeconds,
+            transportRevision = session.transportRevision,
+            isPlaying = session.isPlaying,
+        )
+    }
+
+    fun upcomingWarmupFrameRequestForProject(projectId: Int): ResolvedPreviewFrameRequest? {
+        val session = sessions[projectId] ?: return null
+        val configuration = session.configuration ?: return null
+        val sourcePath = configuration.upcomingSourcePath?.takeIf { it.isNotBlank() } ?: return null
+        val sourceKind = configuration.upcomingSourceKind?.takeIf { it.isNotBlank() } ?: return null
+        val sourceStartSeconds = max(0.0, configuration.upcomingSourceStartSeconds ?: 0.0)
+        val sourcePositionSeconds =
+            if (sourceKind == "video") {
+                configuration.upcomingSourceStartSeconds ?: 0.0
+            } else {
+                null
+            }
+        val frameToken =
+            if (sourceKind == "video") {
+                val millis = ((sourcePositionSeconds ?: sourceStartSeconds) * 1000.0).roundToInt()
+                "video:$sourcePath:$millis"
+            } else {
+                "image:$sourcePath"
+            }
+        return ResolvedPreviewFrameRequest(
+            projectId = configuration.projectId,
+            transportRevision = session.transportRevision,
+            transportKind = "upcomingWarmup",
+            sourceId = configuration.upcomingSourceId,
+            sourcePath = sourcePath,
+            sourceKind = sourceKind,
+            timelinePositionSeconds = session.currentTimelinePositionSeconds,
+            sourcePositionSeconds = sourcePositionSeconds,
+            clipStartSeconds = session.currentTimelinePositionSeconds,
+            clipEndSeconds = null,
+            sourceStartSeconds = sourceStartSeconds,
+            sourceEndSeconds = configuration.upcomingSourceEndSeconds,
+            projectWidth = configuration.projectWidth,
+            projectHeight = configuration.projectHeight,
+            continuityKind = configuration.continuityKind,
+            isPlaying = false,
+            frameToken = frameToken,
+        )
+    }
+
+    fun syncRenderedTimelinePosition(
+        projectId: Int,
+        timelinePositionSeconds: Double,
+        isPlaying: Boolean,
+    ) {
+        val session = sessions[projectId] ?: return
+        val configuration = session.configuration ?: return
+        val clampedTimelinePosition =
+            PreviewFramePlanner.clampTimelinePosition(configuration, timelinePositionSeconds)
+        session.currentTimelinePositionSeconds = clampedTimelinePosition
+        session.isPlaying = isPlaying
+        if (isPlaying) {
+            session.playbackAnchorRealtimeMs = SystemClock.elapsedRealtime()
+            session.playbackAnchorPositionSeconds = clampedTimelinePosition
+            session.lastTransportKind = "playbackTick"
+        } else {
+            stopPlaybackClock(session)
+            session.lastTransportKind = "pause"
+        }
     }
 
     private fun sessionFor(projectId: Int): PreviewSession =
@@ -302,7 +510,7 @@ class FusionAndroidPreviewEngine(
                 session.tickScheduled = false
                 advancePlayback(projectId)
             },
-            33L,
+            PLAYBACK_TICK_MS,
         )
     }
 
@@ -333,7 +541,10 @@ class FusionAndroidPreviewEngine(
         }
     }
 
-    private fun emitFrameRequest(session: PreviewSession) {
+    private fun emitFrameRequest(
+        session: PreviewSession,
+        force: Boolean = false,
+    ) {
         val configuration = session.configuration
         val frameRequest =
             configuration?.let {
@@ -342,8 +553,28 @@ class FusionAndroidPreviewEngine(
                     timelinePositionSeconds = session.currentTimelinePositionSeconds,
                     isPlaying = session.isPlaying,
                     transportRevision = session.transportRevision,
+                    transportKind = session.lastTransportKind,
                 )
             }
+        val nowRealtimeMs = SystemClock.elapsedRealtime()
+        if (
+            !PreviewFrameEmissionPlanner.shouldEmit(
+                previous = session.lastEmittedFrameRequest,
+                current = frameRequest,
+                nowRealtimeMs = nowRealtimeMs,
+                lastEmitRealtimeMs = session.lastFrameEmitRealtimeMs,
+                force = force,
+            )
+        ) {
+            return
+        }
+        session.lastEmittedFrameRequest = frameRequest
+        session.lastFrameEmitRealtimeMs = nowRealtimeMs
         session.outputs.forEach { it.onFrameRequest(frameRequest) }
     }
+
+    private companion object {
+        private const val PLAYBACK_TICK_MS = 16L
+    }
+
 }

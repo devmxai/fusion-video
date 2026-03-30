@@ -128,6 +128,26 @@ class EngineVisualTransformSnapshot {
   final double opacity;
   final double rotationDegrees;
   final int zIndex;
+
+  EngineVisualTransformSnapshot copyWith({
+    double? x,
+    double? y,
+    double? width,
+    double? height,
+    double? opacity,
+    double? rotationDegrees,
+    int? zIndex,
+  }) {
+    return EngineVisualTransformSnapshot(
+      x: x ?? this.x,
+      y: y ?? this.y,
+      width: width ?? this.width,
+      height: height ?? this.height,
+      opacity: opacity ?? this.opacity,
+      rotationDegrees: rotationDegrees ?? this.rotationDegrees,
+      zIndex: zIndex ?? this.zIndex,
+    );
+  }
 }
 
 class EngineCompositionNodeSnapshot {
@@ -277,6 +297,12 @@ abstract class FusionVideoEngineBridge {
     EngineProjectHandle handle,
     String clipId,
     bool muted,
+  );
+
+  Future<void> setClipTransform(
+    EngineProjectHandle handle,
+    String clipId,
+    EngineVisualTransformSnapshot transform,
   );
 
   Future<void> insertClip(

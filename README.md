@@ -70,6 +70,7 @@ The official engine direction is now defined in:
 - [docs/ENGINE_SPEC.md](/Users/mx/Documents/New%20project/fx_flutter_editor/docs/ENGINE_SPEC.md)
 - [docs/ENGINE_ROADMAP.md](/Users/mx/Documents/New%20project/fx_flutter_editor/docs/ENGINE_ROADMAP.md)
 - [docs/ENGINE_ACCEPTANCE.md](/Users/mx/Documents/New%20project/fx_flutter_editor/docs/ENGINE_ACCEPTANCE.md)
+- [docs/ANDROID_ENGINE_COMPLETION_PLAN.md](/Users/mx/Documents/New%20project/fx_flutter_editor/docs/ANDROID_ENGINE_COMPLETION_PLAN.md)
 
 These documents now supersede older informal "iOS first" or "preview plumbing only"
 assumptions.
@@ -345,10 +346,11 @@ These issues are currently considered active and unresolved:
 - Split clips are still not fully trustworthy as real timeline segments: after `split`, some playback paths still behave as if each resulting part is reading from the source start rather than its true clip-local offset
 - On Android, horizontal timeline scrubbing can move the UI ruler/track while the preview canvas lags behind the finger and does not update with the same smoothness seen on iOS simulator
 - On Android, imported `portrait` video can still appear with incorrect canvas sizing or side black bars instead of respecting the expected project fit immediately
+- On Android, even when imported media lands at a more natural portrait size, the visible preview can still shift toward a green tint instead of showing the source colors correctly
 - Base-clip canvas transforms on Android are not yet production-safe in the new engine surface path: zoom / pan / natural media framing can still diverge from the intended scene transform
-- Timeline video filmstrips on Android can still load slowly, appear broken, or show visually incorrect frames while preview playback is under load
+- Timeline video filmstrips on Android can still load slowly, appear broken, or fail to appear until noticeably later instead of showing reliable thumbnails immediately after import
 - During playback, the visible video motion can still show small jitter / unstable movement instead of steady frame-to-frame transport
-- Android playback quality is still below acceptable editor-grade smoothness: inserted video can stutter heavily, audio can cut in and out, and the preview can take too long to stabilize after import or play
+- Android playback quality is still below acceptable editor-grade smoothness: inserted video can stutter heavily, audio can cut in and out or be missing entirely, and the preview can take too long to stabilize after import or play
 - Native preview behavior is not yet fully symmetric between iOS and Android
 - Android export is still not implemented; export foundation currently exists on iOS first
 - The Rust engine is connected through FFI, but real production playback/rendering is still only partially delegated to the engine
@@ -510,10 +512,12 @@ Current symptoms under active investigation:
 - after `split`, each resulting clip can still behave as if it is not fully anchored to its real timeline/source offset, which makes cuts feel visually incorrect and not truly timeline-accurate
 - on Android specifically, timeline scrolling/scrubbing can move the timeline UI while the preview canvas trails behind and does not track the finger with iOS-level smoothness
 - on Android specifically, imported `portrait` media can still render with incorrect framing, delayed stabilization, or side black bars instead of matching the intended canvas fit immediately
+- on Android specifically, imported video can still appear with a green-tinted preview even when the media geometry itself looks closer to correct
 - on Android specifically, the experimental engine-surface path still has unstable base-media layout semantics, so zoom / pan / natural framing are not yet reliable for the primary visual clip
-- on Android specifically, timeline filmstrip thumbnails can still decode too slowly or display malformed-looking frames during editor interaction
+- on Android specifically, timeline filmstrip thumbnails can still decode too slowly, appear much later than expected after import, or display malformed-looking frames during editor interaction
 - even when playback starts correctly, motion on the preview surface can still show small jitter / instability during transport
 - even after recent Android engine-surface work, plain video playback can still be catastrophically choppy on device, with severe video hitching and intermittent audio dropouts after inserting a clip into the timeline
+- in the current Android device state, pressing `play` after inserting a clip can still fail to start real playback at all, and audio can remain fully absent instead of merely degraded
 
 Important clarification:
 

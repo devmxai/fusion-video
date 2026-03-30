@@ -3,6 +3,7 @@ package com.example.fx_flutter_editor.previewengine
 import android.media.MediaCodec
 import android.media.MediaExtractor
 import android.media.MediaFormat
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
@@ -27,7 +28,10 @@ class AndroidCodecVideoSession(
     @Volatile private var currentSurface: Surface? = null
     @Volatile private var pendingPlaybackRequest: PlaybackRequest? = null
     @Volatile private var stopRequested = false
+    @Volatile private var paused = false
     @Volatile private var currentPlaybackToken: String? = null
+    @Volatile private var currentSessionKey: String? = null
+    @Volatile private var currentSourcePositionUs: Long = 0L
     private var currentDecoderPath: String? = null
     private var currentDecoderStartUs: Long = 0L
     private var currentDecoderEndUs: Long? = null
@@ -47,11 +51,17 @@ class AndroidCodecVideoSession(
         }
     }
 
-    fun play(frameRequest: ResolvedPreviewFrameRequest) {
+    fun play(
+        frameRequest: ResolvedPreviewFrameRequest,
+        sessionKey: String,
+    ) {
         currentPlaybackToken = frameRequest.frameToken
+        currentSessionKey = sessionKey
         pendingPlaybackRequest =
             PlaybackRequest(
                 sourcePath = frameRequest.sourcePath,
+                sourceKind = frameRequest.sourceKind,
+                continuityKind = frameRequest.continuityKind,
                 sourceStartUs = (frameRequest.sourceStartSeconds * 1_000_000.0).roundToLong(),
                 sourceEndUs = frameRequest.sourceEndSeconds?.times(1_000_000.0)?.roundToLong(),
                 sourcePositionUs =
@@ -60,14 +70,61 @@ class AndroidCodecVideoSession(
                             1_000_000.0
                         ).roundToLong(),
                 frameToken = frameRequest.frameToken,
+                sessionKey = sessionKey,
             )
         stopRequested = false
+        paused = false
+    }
+
+    fun pausePlayback() {
+        paused = true
+    }
+
+    fun canResume(
+        sessionKey: String,
+        targetSourcePositionSeconds: Double,
+    ): Boolean {
+        val targetSourcePositionUs = (targetSourcePositionSeconds * 1_000_000.0).roundToLong()
+        return currentSessionKey == sessionKey &&
+            paused &&
+            !stopRequested &&
+            !disposed &&
+            codec != null &&
+            extractor != null &&
+            abs(currentSourcePositionUs - targetSourcePositionUs) <= RESUME_POSITION_TOLERANCE_US
+    }
+
+    fun isPausedForSession(sessionKey: String): Boolean {
+        return currentSessionKey == sessionKey && paused && !stopRequested && !disposed
+    }
+
+    fun shouldRetargetPlayback(
+        sessionKey: String,
+        continuityKind: String?,
+        targetSourcePositionSeconds: Double,
+    ): Boolean {
+        if (currentSessionKey != sessionKey || stopRequested || disposed) {
+            return true
+        }
+        val targetSourcePositionUs = (targetSourcePositionSeconds * 1_000_000.0).roundToLong()
+        return VideoPlaybackReplacementPlanner.shouldRetargetActiveSession(
+            continuityKind = continuityKind,
+            targetSourcePositionUs = targetSourcePositionUs,
+            currentSourcePositionUs = currentSourcePositionUs,
+        )
+    }
+
+    fun resumePlayback() {
+        paused = false
     }
 
     fun stopPlayback() {
         stopRequested = true
+        paused = false
         pendingPlaybackRequest = null
         currentPlaybackToken = null
+        currentSessionKey = null
+        currentSourcePositionUs = 0L
     }
 
     fun dispose() {
@@ -98,40 +155,45 @@ class AndroidCodecVideoSession(
             extractor?.seekTo(request.sourcePositionUs, MediaExtractor.SEEK_TO_PREVIOUS_SYNC)
             codec?.flush()
             inputEos = false
+            currentSourcePositionUs = request.sourcePositionUs
 
-            val playbackAnchorRealtimeMs = SystemClock.elapsedRealtime()
+            val playbackAnchorRealtimeNs = System.nanoTime()
             val playbackAnchorSourceUs = request.sourcePositionUs
             var outputEos = false
             var lastRenderedSourceUs = request.sourcePositionUs
             val bufferInfo = MediaCodec.BufferInfo()
 
             while (!disposed && !stopRequested && currentPlaybackToken == request.frameToken && !outputEos) {
+                if (paused) {
+                    dispatchToMain { listener.onCodecBufferingChanged(false) }
+                    if (pendingPlaybackRequest != null && pendingPlaybackRequest?.frameToken != request.frameToken) {
+                        return
+                    }
+                    SystemClock.sleep(PAUSED_SLEEP_MS)
+                    continue
+                }
                 feedDecoderInput(request)
                 val outputIndex = codec?.dequeueOutputBuffer(bufferInfo, 10_000) ?: -1
                 when {
                     outputIndex >= 0 -> {
                         val presentationUs = bufferInfo.presentationTimeUs
                         val reachedEnd =
-                            request.sourceEndUs != null &&
+                            request.enforceSourceWindow &&
+                                request.sourceEndUs != null &&
                                 presentationUs >= request.sourceEndUs - 1_000
                         val shouldRender =
                             bufferInfo.size > 0 &&
                                 presentationUs >= request.sourcePositionUs - 1_000
                         if (shouldRender) {
-                            val targetRealtimeMs =
-                                playbackAnchorRealtimeMs +
+                            val targetRealtimeNs =
+                                playbackAnchorRealtimeNs +
                                     max(
                                         0L,
-                                        ((presentationUs - playbackAnchorSourceUs) / 1000.0)
-                                            .roundToLong(),
-                                    )
-                            val remainingDelayMs =
-                                targetRealtimeMs - SystemClock.elapsedRealtime()
-                            if (remainingDelayMs > 1L) {
-                                SystemClock.sleep(remainingDelayMs)
-                            }
-                            codec?.releaseOutputBuffer(outputIndex, true)
+                                        presentationUs - playbackAnchorSourceUs,
+                                    ) * 1_000L
+                            releaseOutputBufferAt(codec, outputIndex, targetRealtimeNs)
                             lastRenderedSourceUs = presentationUs
+                            currentSourcePositionUs = presentationUs
                             dispatchToMain { listener.onCodecBufferingChanged(false) }
                             dispatchToMain {
                                 listener.onCodecFrameRendered(presentationUs / 1_000_000.0)
@@ -152,12 +214,20 @@ class AndroidCodecVideoSession(
                 val replacementRequest = pendingPlaybackRequest
                 if (
                     replacementRequest != null &&
-                        (
-                            replacementRequest.sourcePath != request.sourcePath ||
-                                replacementRequest.sourceStartUs != request.sourceStartUs ||
-                                replacementRequest.sourceEndUs != request.sourceEndUs ||
-                                abs(replacementRequest.sourcePositionUs - lastRenderedSourceUs) > 50_000L
-                            )
+                        VideoPlaybackReplacementPlanner.shouldRestart(
+                            currentSourcePath = request.sourcePath,
+                            currentContinuityKind = request.continuityKind,
+                            currentSourceStartUs = request.sourceStartUs,
+                            currentSourceEndUs = request.sourceEndUs,
+                            currentEnforceSourceWindow = request.enforceSourceWindow,
+                            replacementSourcePath = replacementRequest.sourcePath,
+                            replacementContinuityKind = replacementRequest.continuityKind,
+                            replacementSourceStartUs = replacementRequest.sourceStartUs,
+                            replacementSourceEndUs = replacementRequest.sourceEndUs,
+                            replacementEnforceSourceWindow = replacementRequest.enforceSourceWindow,
+                            replacementSourcePositionUs = replacementRequest.sourcePositionUs,
+                            lastRenderedSourceUs = lastRenderedSourceUs,
+                        )
                 ) {
                     return
                 }
@@ -183,16 +253,40 @@ class AndroidCodecVideoSession(
         }
     }
 
+    private fun releaseOutputBufferAt(
+        codec: MediaCodec?,
+        outputIndex: Int,
+        targetRealtimeNs: Long,
+    ) {
+        val safeCodec = codec ?: return
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+            val renderTimestampNs = max(System.nanoTime(), targetRealtimeNs)
+            safeCodec.releaseOutputBuffer(outputIndex, renderTimestampNs)
+            return
+        }
+        val targetRealtimeMs = targetRealtimeNs / 1_000_000L
+        val remainingDelayMs = targetRealtimeMs - SystemClock.elapsedRealtime()
+        if (remainingDelayMs > 1L) {
+            SystemClock.sleep(remainingDelayMs)
+        }
+        safeCodec.releaseOutputBuffer(outputIndex, true)
+    }
+
     private fun ensureDecoder(
         request: PlaybackRequest,
         surface: Surface,
     ) {
         val needsRebuild =
             request.sourcePath != currentDecoderPath ||
-                request.sourceStartUs != currentDecoderStartUs ||
-                request.sourceEndUs != currentDecoderEndUs ||
                 extractor == null ||
-                codec == null
+                codec == null ||
+                (
+                    request.enforceSourceWindow &&
+                        (
+                            request.sourceStartUs != currentDecoderStartUs ||
+                                request.sourceEndUs != currentDecoderEndUs
+                            )
+                    )
         if (!needsRebuild) {
             return
         }
@@ -252,7 +346,7 @@ class AndroidCodecVideoSession(
             return
         }
         val sampleTimeUs = extractor.sampleTime
-        if (request.sourceEndUs != null && sampleTimeUs > request.sourceEndUs) {
+        if (request.enforceSourceWindow && request.sourceEndUs != null && sampleTimeUs > request.sourceEndUs) {
             codec.queueInputBuffer(
                 inputIndex,
                 0,
@@ -297,9 +391,24 @@ class AndroidCodecVideoSession(
 
     private data class PlaybackRequest(
         val sourcePath: String,
+        val sourceKind: String,
+        val continuityKind: String?,
         val sourceStartUs: Long,
         val sourceEndUs: Long?,
         val sourcePositionUs: Long,
         val frameToken: String,
-    )
+        val sessionKey: String,
+    ) {
+        val enforceSourceWindow: Boolean
+            get() =
+                !(
+                    sourceKind == "video" &&
+                        continuityKind == "sameSourceContiguous"
+                    )
+    }
+
+    private companion object {
+        private const val PAUSED_SLEEP_MS = 8L
+        private const val RESUME_POSITION_TOLERANCE_US = 80_000L
+    }
 }
