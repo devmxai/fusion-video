@@ -99,7 +99,11 @@ class EditorSceneMapper {
     List<EngineAudioNodeSnapshot> nodes,
   ) {
     return nodes
-        .where((node) => node.trackKind == EngineTrackKind.audio)
+        .where(
+          (node) =>
+              node.trackKind == EngineTrackKind.audio ||
+              node.trackKind == EngineTrackKind.video,
+        )
         .map(
           (node) => PreviewAudioNode(
             clipId: node.clipId,

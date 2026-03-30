@@ -75,6 +75,7 @@ class PreviewFrameEmissionPlannerTest {
             projectId = 7,
             transportRevision = transportRevision,
             transportKind = "playbackTick",
+            baseClipId = "clip-a",
             sourceId = "clip-a",
             sourcePath = "/tmp/source.mp4",
             sourceKind = "video",

@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 
 import '../../../../core/engine/engine_contract.dart';
-import '../../../../core/theme/app_theme.dart';
 import 'composition_preview_overlay.dart';
 
 class PreviewTransformOverlay extends StatefulWidget {
@@ -31,7 +30,8 @@ class PreviewTransformOverlay extends StatefulWidget {
   final ValueChanged<EngineVisualTransformSnapshot> onTransformCommitted;
 
   @override
-  State<PreviewTransformOverlay> createState() => _PreviewTransformOverlayState();
+  State<PreviewTransformOverlay> createState() =>
+      _PreviewTransformOverlayState();
 }
 
 class _PreviewTransformOverlayState extends State<PreviewTransformOverlay> {
@@ -60,14 +60,6 @@ class _PreviewTransformOverlayState extends State<PreviewTransformOverlay> {
               baseClipId: widget.baseClipId,
               selectedClipId: widget.selectedClipId,
             ),
-            if (selectedNode != null)
-              IgnorePointer(
-                child: _SelectedClipBounds(
-                  node: selectedNode,
-                  projectWidth: widget.projectWidth,
-                  projectHeight: widget.projectHeight,
-                ),
-              ),
             if (widget.enabled && selectedNode != null)
               GestureDetector(
                 behavior: HitTestBehavior.translucent,
@@ -132,16 +124,23 @@ class _PreviewTransformOverlayState extends State<PreviewTransformOverlay> {
     final focalPoint = _projectOffset(details.localFocalPoint, constraints);
     final maxWidth = widget.projectWidth * 4.0;
     final maxHeight = widget.projectHeight * 4.0;
+    final isBaseClip = widget.baseClipId != null &&
+        widget.baseClipId == widget.selectedNode?.clipId;
+    final minWidth = isBaseClip ? widget.projectWidth.toDouble() : 80.0;
+    final minHeight = isBaseClip ? widget.projectHeight.toDouble() : 80.0;
     final nextWidth =
-        (start.width * details.scale).clamp(80.0, maxWidth).toDouble();
+        (start.width * details.scale).clamp(minWidth, maxWidth).toDouble();
     final nextHeight =
-        (start.height * details.scale).clamp(80.0, maxHeight).toDouble();
-    final nextTransform = start.copyWith(
+        (start.height * details.scale).clamp(minHeight, maxHeight).toDouble();
+    var nextTransform = start.copyWith(
       x: focalPoint.dx - (_focalRatioX * nextWidth),
       y: focalPoint.dy - (_focalRatioY * nextHeight),
       width: nextWidth,
       height: nextHeight,
     );
+    if (isBaseClip) {
+      nextTransform = _clampBaseClipTransform(nextTransform);
+    }
     _latestTransform = nextTransform;
     widget.onTransformChanged(nextTransform);
   }
@@ -168,53 +167,21 @@ class _PreviewTransformOverlayState extends State<PreviewTransformOverlay> {
       localPoint.dy / height * widget.projectHeight,
     );
   }
-}
 
-class _SelectedClipBounds extends StatelessWidget {
-  const _SelectedClipBounds({
-    required this.node,
-    required this.projectWidth,
-    required this.projectHeight,
-  });
-
-  final EngineCompositionNodeSnapshot node;
-  final int projectWidth;
-  final int projectHeight;
-
-  @override
-  Widget build(BuildContext context) {
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final widthScale = constraints.maxWidth / projectWidth;
-        final heightScale = constraints.maxHeight / projectHeight;
-        return Stack(
-          fit: StackFit.expand,
-          children: [
-            Positioned(
-              left: node.transform.x * widthScale,
-              top: node.transform.y * heightScale,
-              width: node.transform.width * widthScale,
-              height: node.transform.height * heightScale,
-              child: DecoratedBox(
-                decoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(18),
-                  border: Border.all(
-                    color: Colors.white.withOpacity(0.74),
-                    width: 2,
-                  ),
-                  boxShadow: [
-                    BoxShadow(
-                      color: FxPalette.accent.withOpacity(0.18),
-                      blurRadius: 14,
-                      spreadRadius: 1,
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          ],
-        );
-      },
+  EngineVisualTransformSnapshot _clampBaseClipTransform(
+    EngineVisualTransformSnapshot transform,
+  ) {
+    final minWidth = widget.projectWidth.toDouble();
+    final minHeight = widget.projectHeight.toDouble();
+    final width = transform.width < minWidth ? minWidth : transform.width;
+    final height = transform.height < minHeight ? minHeight : transform.height;
+    final minX = widget.projectWidth.toDouble() - width;
+    final minY = widget.projectHeight.toDouble() - height;
+    return transform.copyWith(
+      x: transform.x.clamp(minX, 0.0).toDouble(),
+      y: transform.y.clamp(minY, 0.0).toDouble(),
+      width: width,
+      height: height,
     );
   }
 }

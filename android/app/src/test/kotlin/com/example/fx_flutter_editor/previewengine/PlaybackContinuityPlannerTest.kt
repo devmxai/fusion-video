@@ -13,6 +13,7 @@ class PlaybackContinuityPlannerTest {
         projectId = 1,
         transportRevision = 5,
         transportKind = "play",
+        baseClipId = "clip-a",
         sourceId = "clip-a",
         sourcePath = sourcePath,
         sourceKind = "video",

@@ -56,7 +56,7 @@ private class FusionEnginePreviewNativeView(
         FrameLayout(context).apply {
             setBackgroundColor(Color.BLACK)
             clipChildren = true
-            visibility = View.GONE
+            visibility = View.VISIBLE
         }
     private val videoSurfaceView = SurfaceView(context)
     private val rendererContainer =
@@ -178,6 +178,11 @@ private class FusionEnginePreviewNativeView(
             val previousPlayingFrameRequest = lastPlayingFrameRequest
             val targetSourcePositionSeconds =
                 frameRequest.sourcePositionSeconds ?: frameRequest.sourceStartSeconds
+            val isWithinVideoStartupGrace =
+                isSamePlaybackSession &&
+                    !isCodecFrameReady &&
+                    lastVideoPlaybackStartRealtimeMs > 0L &&
+                    nowRealtimeMs - lastVideoPlaybackStartRealtimeMs < VIDEO_STARTUP_GRACE_MS
             val canResumePlayback =
                 videoSession.canResume(
                     sessionKey = nextPlaybackSessionKey,
@@ -187,6 +192,7 @@ private class FusionEnginePreviewNativeView(
                 videoSession.isPausedForSession(nextPlaybackSessionKey)
             val shouldRetargetPlayback =
                 isSamePlaybackSession &&
+                    !isWithinVideoStartupGrace &&
                     !isPausedPlaybackSession &&
                     videoSession.shouldRetargetPlayback(
                         sessionKey = nextPlaybackSessionKey,
@@ -205,13 +211,10 @@ private class FusionEnginePreviewNativeView(
                         current = frameRequest,
                     )
             val isWaitingForFirstCodecFrame =
-                isSamePlaybackSession &&
-                    !isCodecFrameReady &&
+                isWithinVideoStartupGrace &&
                     !canResumePlayback &&
                     !isPausedPlaybackSession &&
-                    !shouldRetargetPlayback &&
-                    lastVideoPlaybackStartRealtimeMs > 0L &&
-                    nowRealtimeMs - lastVideoPlaybackStartRealtimeMs < VIDEO_STARTUP_GRACE_MS
+                    !shouldRetargetPlayback
             lastPlayingFrameRequest = frameRequest
             if (canBypassSteadyPlaybackTick) {
                 showVideoOnly()
@@ -366,7 +369,7 @@ private class FusionEnginePreviewNativeView(
     }
 
     private fun showRendererOnly() {
-        setVisibility(videoContainer, View.GONE)
+        setVisibility(videoContainer, View.VISIBLE)
         setVisibility(rendererContainer, View.VISIBLE)
     }
 
@@ -542,7 +545,7 @@ private class FusionEnginePreviewNativeView(
         if (parentWidth <= 0 || parentHeight <= 0) {
             return
         }
-        val sceneNode = previewEngine.sceneNodeForClip(projectId, frameRequest.sourceId)
+        val sceneNode = previewEngine.sceneNodeForClip(projectId, frameRequest.baseClipId)
         val projectWidth = frameRequest.projectWidth ?: parentWidth
         val projectHeight = frameRequest.projectHeight ?: parentHeight
         val nodeLayout =
@@ -751,7 +754,7 @@ private class FusionEnginePreviewNativeView(
 
     private fun resolveContentFitMode(
         frameRequest: ResolvedPreviewFrameRequest,
-        sceneNode: Map<String, Any?>? = previewEngine.sceneNodeForClip(projectId, frameRequest.sourceId),
+        sceneNode: Map<String, Any?>? = previewEngine.sceneNodeForClip(projectId, frameRequest.baseClipId),
         projectWidth: Int = frameRequest.projectWidth ?: width,
         projectHeight: Int = frameRequest.projectHeight ?: height,
     ): PreviewContentFitMode {

@@ -350,6 +350,7 @@ These issues are currently considered active and unresolved:
 - Base-clip canvas transforms on Android are not yet production-safe in the new engine surface path: zoom / pan / natural media framing can still diverge from the intended scene transform
 - Timeline video filmstrips on Android can still load slowly, appear broken, or fail to appear until noticeably later instead of showing reliable thumbnails immediately after import
 - During playback, the visible video motion can still show small jitter / unstable movement instead of steady frame-to-frame transport
+- The recent white/green transform border issue was removed, but the deeper Android playback fault remains: after import, pressing `play` can still leave the video visually frozen while audio appears only after a delay and then cuts badly
 - Android playback quality is still below acceptable editor-grade smoothness: inserted video can stutter heavily, audio can cut in and out or be missing entirely, and the preview can take too long to stabilize after import or play
 - Native preview behavior is not yet fully symmetric between iOS and Android
 - Android export is still not implemented; export foundation currently exists on iOS first
@@ -516,6 +517,7 @@ Current symptoms under active investigation:
 - on Android specifically, the experimental engine-surface path still has unstable base-media layout semantics, so zoom / pan / natural framing are not yet reliable for the primary visual clip
 - on Android specifically, timeline filmstrip thumbnails can still decode too slowly, appear much later than expected after import, or display malformed-looking frames during editor interaction
 - even when playback starts correctly, motion on the preview surface can still show small jitter / instability during transport
+- on the latest Android device builds, the white/green transform frame was removed, but pressing `play` can still leave the video visually stuck on preview while audio starts only after a noticeable delay and continues to stutter
 - even after recent Android engine-surface work, plain video playback can still be catastrophically choppy on device, with severe video hitching and intermittent audio dropouts after inserting a clip into the timeline
 - in the current Android device state, pressing `play` after inserting a clip can still fail to start real playback at all, and audio can remain fully absent instead of merely degraded
 
